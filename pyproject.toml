@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentharness"
+version = "0.1.0"
+description = "A containerised AI harness with tools, skills, and multi-state sessions"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "anthropic>=0.40",
+    "openai>=1.40",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+agentharness = "agentharness.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# TRY004: we raise ValueError (not TypeError) on bad frontmatter types on
+# purpose — the skill scan loop catches ValueError as its validation-failure
+# signal, so a TypeError would escape and abort the whole scan.
+ignore = ["TRY004"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
