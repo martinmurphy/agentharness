@@ -1,0 +1,12 @@
+.venv/
+venv/
+.git/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.egg-info/
+build/
+dist/
+tests/
+skills/
+config.yaml
