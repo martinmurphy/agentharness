@@ -16,6 +16,7 @@ from agentharness.providers.base import Message, Provider, TextBlock
 from agentharness.providers.factory import build_provider, provider_status
 from agentharness.skills.loader import SkillSet, load_skills
 from agentharness.state import StateManager
+from agentharness.tools.model_tools import list_models_tool
 from agentharness.tools.registry import ToolRegistry, build_default_registry
 
 # readline is imported for its side effect: line editing + history on input().
@@ -57,7 +58,6 @@ class Harness:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.skillset: SkillSet = load_skills(config.skills_dir)
-        self.registry: ToolRegistry = build_default_registry(self.skillset)
         self.ansi = _Ansi(sys.stdout.isatty())
         self.states = StateManager(
             self._build_provider,
@@ -65,9 +65,26 @@ class Harness:
             default_model=config.model,
             default_system=config.system_prompt,
         )
+        self.registry: ToolRegistry = self._build_registry()
 
     def _build_provider(self, provider_name: str, model: str) -> Provider:
         return build_provider(provider_name, model, self.config)
+
+    def _build_registry(self) -> ToolRegistry:
+        """Default (state-free) tools plus the state-dependent list_models tool."""
+        registry = build_default_registry(self.skillset)
+        registry.register(list_models_tool(self._active_model_ids))
+        return registry
+
+    def _active_model_ids(self) -> list[str]:
+        """Model IDs on the active state's provider (for the list_models tool)."""
+        provider = self.states.active.provider
+        lister = getattr(provider, "list_models", None)
+        if lister is None:
+            raise ValueError(
+                f"provider {self.states.active.provider_name!r} cannot list models"
+            )
+        return lister()
 
     def effective_system(self) -> str:
         catalog = self.skillset.catalog_prompt()
@@ -119,7 +136,7 @@ class Harness:
 
     def reload_skills(self) -> None:
         self.skillset = load_skills(self.config.skills_dir)
-        self.registry = build_default_registry(self.skillset)
+        self.registry = self._build_registry()
 
 
 HELP = """\

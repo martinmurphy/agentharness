@@ -284,3 +284,34 @@ def test_repl_help_lists_providers(tmp_path, monkeypatch, capsys):
     h, repl = _harness(tmp_path, monkeypatch)
     repl._handle_command(h, "/help")
     assert "/providers" in capsys.readouterr().out
+
+
+def test_repl_registers_list_models_tool(tmp_path, monkeypatch):
+    from agentharness import repl
+    from agentharness.providers.base import ToolCall as TC
+
+    class ListingProvider(FakeProvider):
+        def list_models(self):
+            return ["fake-1", "fake-2"]
+
+    prov = ListingProvider([])
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: prov)
+    h = repl.Harness(Config(skills_dir=str(tmp_path)))
+
+    assert "list_models" in h.registry  # registered by the harness, not build_default_registry
+    # Dispatching it reaches the active state's provider (built lazily).
+    result = h.registry.dispatch(TC(id="c", name="list_models", arguments={}))
+    assert not result.is_error
+    assert "fake-1" in result.content and "fake-2" in result.content
+
+
+def test_list_models_tool_unsupported_provider(tmp_path, monkeypatch):
+    from agentharness import repl
+    from agentharness.providers.base import ToolCall as TC
+
+    prov = FakeProvider([])  # no list_models method
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: prov)
+    h = repl.Harness(Config(skills_dir=str(tmp_path)))
+    result = h.registry.dispatch(TC(id="c", name="list_models", arguments={}))
+    assert result.is_error
+    assert "cannot list models" in result.content

@@ -7,6 +7,7 @@ import pytest
 from agentharness.providers.base import ToolCall
 from agentharness.skills.loader import load_skills
 from agentharness.tools.greet import greet_tool
+from agentharness.tools.model_tools import list_models_tool
 from agentharness.tools.registry import ToolRegistry, build_default_registry
 
 
@@ -68,6 +69,34 @@ def test_default_registry_includes_skill_and_provider_tools(tmp_path):
         "read_skill",
         "read_skill_file",
     }
+
+
+def test_list_models_tool():
+    reg = ToolRegistry()
+    reg.register(list_models_tool(lambda: ["model-a", "model-b"]))
+    result = reg.dispatch(ToolCall(id="c", name="list_models", arguments={}))
+    assert not result.is_error
+    assert "model-a" in result.content and "model-b" in result.content
+
+
+def test_list_models_tool_surfaces_errors():
+    reg = ToolRegistry()
+
+    def _boom():
+        raise RuntimeError("network down")
+
+    reg.register(list_models_tool(_boom))
+    result = reg.dispatch(ToolCall(id="c", name="list_models", arguments={}))
+    assert result.is_error
+    assert "network down" in result.content
+
+
+def test_list_models_tool_empty():
+    reg = ToolRegistry()
+    reg.register(list_models_tool(list))
+    result = reg.dispatch(ToolCall(id="c", name="list_models", arguments={}))
+    assert not result.is_error
+    assert "No models" in result.content
 
 
 def test_list_providers_tool(tmp_path, monkeypatch):

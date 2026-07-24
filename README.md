@@ -139,7 +139,10 @@ providers:
 
 - **Add a tool** — write a handler and a `Tool` (see `tools/greet.py`, or
   `tools/provider_tools.py` for one that exposes harness internals to the
-  model), then register it in `tools/registry.build_default_registry`.
+  model), then register it in `tools/registry.build_default_registry`. A tool
+  that needs live state (e.g. `list_models`, which queries the active state's
+  provider) is registered by the harness instead — see `Harness._build_registry`
+  in `repl.py`.
 - **Add a skill** — create `skills/<name>/SKILL.md` with `name` (matching the
   directory) and `description` frontmatter. Optional `references/`, `assets/`,
   `scripts/` files are read as text via `read_skill_file`. Run `/reload`.
