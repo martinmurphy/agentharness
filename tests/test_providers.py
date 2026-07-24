@@ -290,3 +290,167 @@ def test_anthropic_assistant_fallback_without_provider_raw():
     types = [b["type"] for b in content]
     assert "text" in types and "tool_use" in types
     assert "thinking" not in types  # cannot reconstruct signed thinking
+
+
+# ---- Gemini -----------------------------------------------------------------
+
+
+class FakeGeminiClient:
+    def __init__(self, response):
+        self._response = response
+        self.captured = None
+        self.models = SimpleNamespace(generate_content=self._generate)
+
+    def _generate(self, *, model, contents, config):
+        self.captured = {"model": model, "contents": contents, "config": config}
+        return self._response
+
+
+def _gemini_response(parts, finish_reason="STOP"):
+    content = SimpleNamespace(role="model", parts=parts)
+    candidate = SimpleNamespace(content=content, finish_reason=finish_reason)
+    return SimpleNamespace(
+        candidates=[candidate],
+        usage_metadata=SimpleNamespace(prompt_token_count=9, candidates_token_count=4),
+    )
+
+
+def _gemini_text_part(text, *, thought=False):
+    return SimpleNamespace(text=text, thought=thought, function_call=None)
+
+
+def _gemini_fc_part(name, args, id_=None):
+    fc = SimpleNamespace(name=name, args=args, id=id_)
+    return SimpleNamespace(text=None, thought=False, function_call=fc)
+
+
+def test_gemini_request_shape():
+    from agentharness.providers.gemini import GeminiProvider
+
+    client = FakeGeminiClient(_gemini_response([_gemini_text_part("hi there")]))
+    provider = GeminiProvider("gemini-2.5-flash", client=client)
+    resp = provider.chat(
+        system="SYS",
+        messages=[Message(role="user", blocks=[TextBlock("hello")])],
+        tools=TOOLS,
+        max_tokens=100,
+    )
+    cap = client.captured
+    assert cap["model"] == "gemini-2.5-flash"
+    cfg = cap["config"]
+    assert cfg.system_instruction == "SYS"
+    assert cfg.max_output_tokens == 100
+    assert cfg.automatic_function_calling.disable is True  # loop stays ours
+    # one Tool with our function declaration carrying the JSON schema verbatim
+    decl = cfg.tools[0].function_declarations[0]
+    assert decl.name == "greet"
+    assert decl.parameters_json_schema == TOOLS[0].input_schema
+    # contents: a single user Content with a text part
+    assert cap["contents"][0].role == "user"
+    assert cap["contents"][0].parts[0].text == "hello"
+
+    assert resp.stop_reason == "end_turn"
+    assert resp.message.text() == "hi there"
+    assert resp.usage.input_tokens == 9
+    assert resp.usage.output_tokens == 4
+
+
+def test_gemini_parses_function_call_as_tool_use():
+    from agentharness.providers.gemini import GeminiProvider
+
+    part = _gemini_fc_part("greet", {"name": "Ada"}, id_="fc_1")
+    client = FakeGeminiClient(_gemini_response([part]))  # finish STOP even with a call
+    provider = GeminiProvider("m", client=client)
+    resp = provider.chat(system="", messages=[], tools=TOOLS, max_tokens=10)
+    assert resp.stop_reason == "tool_use"  # detected by the call, not finish_reason
+    call = resp.message.tool_calls()[0]
+    assert call.id == "fc_1"
+    assert call.name == "greet"
+    assert call.arguments == {"name": "Ada"}
+
+
+def test_gemini_function_call_without_id_uses_name():
+    from agentharness.providers.gemini import GeminiProvider
+
+    part = _gemini_fc_part("greet", {"name": "Ada"}, id_=None)
+    client = FakeGeminiClient(_gemini_response([part]))
+    provider = GeminiProvider("m", client=client)
+    resp = provider.chat(system="", messages=[], tools=TOOLS, max_tokens=10)
+    assert resp.message.tool_calls()[0].id == "greet"
+
+
+def test_gemini_thought_part_becomes_thinking_block():
+    from agentharness.providers.gemini import GeminiProvider
+
+    parts = [_gemini_text_part("reasoning", thought=True), _gemini_text_part("answer")]
+    client = FakeGeminiClient(_gemini_response(parts))
+    provider = GeminiProvider("m", client=client)
+    resp = provider.chat(system="", messages=[], tools=[], max_tokens=10)
+    kinds = [type(b).__name__ for b in resp.message.blocks]
+    assert kinds == ["ThinkingBlock", "TextBlock"]
+    assert resp.message.text() == "answer"  # thought excluded from text()
+
+
+def test_gemini_refusal_stop_reason():
+    from agentharness.providers.gemini import GeminiProvider
+
+    client = FakeGeminiClient(_gemini_response([], finish_reason="SAFETY"))
+    provider = GeminiProvider("m", client=client)
+    resp = provider.chat(system="", messages=[], tools=[], max_tokens=10)
+    assert resp.stop_reason == "refusal"
+
+
+def test_gemini_tool_result_roundtrip_and_provider_raw():
+    from agentharness.providers.gemini import GeminiProvider
+
+    part = _gemini_fc_part("greet", {"name": "Ada"}, id_="fc_1")
+    client = FakeGeminiClient(_gemini_response([part]))
+    provider = GeminiProvider("m", client=client)
+    resp = provider.chat(system="", messages=[], tools=TOOLS, max_tokens=10)
+
+    # provider_raw is the original model Content, replayed verbatim.
+    assert resp.message.provider_raw is not None
+
+    provider.chat(
+        system="",
+        messages=[
+            Message(role="user", blocks=[TextBlock("go")]),
+            resp.message,
+            Message(role="tool", blocks=[ToolResult(call_id="fc_1", content="Hi Ada")]),
+        ],
+        tools=TOOLS,
+        max_tokens=10,
+    )
+    contents = client.captured["contents"]
+    # assistant model turn replayed as the raw Content object
+    assert contents[1] is resp.message.provider_raw
+    # tool result -> user Content with a function_response naming the function
+    fr_content = contents[2]
+    assert fr_content.role == "user"
+    fr = fr_content.parts[0].function_response
+    assert fr.name == "greet"        # recovered from the model turn's call
+    assert fr.id == "fc_1"
+    assert fr.response == {"result": "Hi Ada"}
+
+
+def test_gemini_error_tool_result_wrapped_as_error():
+    from agentharness.providers.gemini import GeminiProvider
+
+    part = _gemini_fc_part("greet", {}, id_="fc_1")
+    client = FakeGeminiClient(_gemini_response([part]))
+    provider = GeminiProvider("m", client=client)
+    resp = provider.chat(system="", messages=[], tools=TOOLS, max_tokens=10)
+    provider.chat(
+        system="",
+        messages=[
+            resp.message,
+            Message(
+                role="tool",
+                blocks=[ToolResult(call_id="fc_1", content="boom", is_error=True)],
+            ),
+        ],
+        tools=TOOLS,
+        max_tokens=10,
+    )
+    fr = client.captured["contents"][1].parts[0].function_response
+    assert fr.response == {"error": "boom"}

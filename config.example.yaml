@@ -3,13 +3,14 @@
 # Copy to config.yaml (or point $AGENTHARNESS_CONFIG at it). Every key may also
 # be overridden with an AGENTHARNESS_<KEY> environment variable, e.g.
 # AGENTHARNESS_MODEL. API keys are NOT set here — they come from the provider
-# SDKs' own environment variables (ANTHROPIC_API_KEY, OPENAI_API_KEY).
+# SDKs' own environment variables (ANTHROPIC_API_KEY, OPENAI_API_KEY,
+# GEMINI_API_KEY).
 
-provider: anthropic
+provider: anthropic          # anthropic | openai | gemini
 model: claude-opus-4-8
 max_tokens: 16000
-effort: high                 # low | medium | high | xhigh | max (Anthropic)
-show_thinking: false         # render summarized model reasoning in the REPL
+effort: high                 # low | medium | high | xhigh | max (Anthropic only)
+show_thinking: false         # render model reasoning (Anthropic summary / Gemini thoughts)
 max_tool_iterations: 10      # cap on tool round-trips within one turn
 skills_dir: ./skills         # inside the container this is /skills (mounted)
 
@@ -17,8 +18,10 @@ skills_dir: ./skills         # inside the container this is /skills (mounted)
 #   You are a helpful assistant running inside agentharness.
 
 # Per-provider settings. base_url lets the openai provider target any
-# OpenAI-compatible server (OpenAI, Ollama, vLLM, ...).
+# OpenAI-compatible server (OpenAI, Ollama, vLLM, ...). Gemini here is the AI
+# Studio (Developer API) path — key from GEMINI_API_KEY, no options needed.
 providers:
   anthropic: {}
   openai:
     base_url: https://api.openai.com/v1
+  gemini: {}

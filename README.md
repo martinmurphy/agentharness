@@ -21,8 +21,9 @@ model.
   model as a catalog it loads on demand.
 - **Multiple states** — independent in-memory conversations, each with its own
   history, system prompt, provider, and model.
-- **Providers** — Anthropic and any OpenAI-compatible endpoint (OpenAI, Ollama,
-  vLLM, …) today; the abstraction is built for Gemini and others next.
+- **Providers** — Anthropic, Google Gemini (AI Studio), and any
+  OpenAI-compatible endpoint (OpenAI, Ollama, vLLM, …); the abstraction is
+  built so the next backend is another adapter, not a refactor.
 
 ## Quick start (container)
 
@@ -88,6 +89,7 @@ Each state can target a different backend:
 
 ```
 /new research --provider openai --model gpt-4o
+/new gem      --provider gemini --model gemini-2.5-flash
 ```
 
 ## Configuration
@@ -95,7 +97,22 @@ Each state can target a different backend:
 Config is resolved from `$AGENTHARNESS_CONFIG` → `/config/config.yaml` →
 `./config.yaml`. Any key may be overridden by an `AGENTHARNESS_<KEY>`
 environment variable. See [`config.example.yaml`](config.example.yaml). API keys
-are **not** config keys — they come from `ANTHROPIC_API_KEY` / `OPENAI_API_KEY`.
+are **not** config keys — they come from `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
+or `GEMINI_API_KEY`.
+
+Gemini uses the **AI Studio (Developer API)** path — get a key at
+<https://aistudio.google.com/apikey>, export it as `GEMINI_API_KEY`, and:
+
+```yaml
+provider: gemini
+model: gemini-2.5-flash        # or gemini-2.5-pro
+```
+
+Pass it to the container the same way as the others:
+
+```bash
+podman run --rm -it -e GEMINI_API_KEY -v "$PWD/skills:/skills:ro,Z" agentharness
+```
 
 To use a local OpenAI-compatible server:
 
@@ -130,7 +147,7 @@ src/agentharness/
   state.py             ConversationState + StateManager (in-memory)
   skills/              Skill model, discovery, validation, catalog
   tools/               registry, greet, read_skill / read_skill_file
-  providers/           neutral model, Anthropic + OpenAI-compatible adapters
+  providers/           neutral model + Anthropic / Gemini / OpenAI adapters
 skills/                example skills (bind-mounted to /skills at runtime)
 Containerfile          UBI10 + python3.14
 ```
@@ -138,5 +155,5 @@ Containerfile          UBI10 + python3.14
 ## Scope (v1)
 
 In-memory state only (nothing persists across restarts); skill `scripts/` are
-readable as text but never executed; no streaming, no Gemini yet. Each of those
-is a clean addition against the existing seams — see the design doc in the plan.
+readable as text but never executed; no streaming yet. Each is a clean addition
+against the existing seams — see the design doc in the plan.

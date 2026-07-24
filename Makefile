@@ -17,7 +17,7 @@ build:
 
 run:
 	podman run --rm -it \
-		-e ANTHROPIC_API_KEY -e OPENAI_API_KEY \
+		-e ANTHROPIC_API_KEY -e OPENAI_API_KEY -e GEMINI_API_KEY \
 		-v "$(SKILLS):/skills:ro,Z" \
 		$(IMAGE)
 
