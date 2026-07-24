@@ -266,3 +266,21 @@ def test_repl_models_surfaces_errors(tmp_path, monkeypatch, capsys):
     h = repl.Harness(Config(skills_dir=str(tmp_path)))
     repl._handle_command(h, "/models")
     assert "boom" in capsys.readouterr().out
+
+
+def test_repl_providers_lists_and_marks_active(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("GEMINI_API_KEY", "y")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    h, repl = _harness(tmp_path, monkeypatch)  # default provider is anthropic
+    repl._handle_command(h, "/providers")
+    out = capsys.readouterr().out
+    for name in ("anthropic", "openai", "gemini"):
+        assert name in out
+    assert "(active)" in out          # anthropic is the default/active provider
+    assert "no key" in out            # openai has no key set
+
+
+def test_repl_help_lists_providers(tmp_path, monkeypatch, capsys):
+    h, repl = _harness(tmp_path, monkeypatch)
+    repl._handle_command(h, "/help")
+    assert "/providers" in capsys.readouterr().out

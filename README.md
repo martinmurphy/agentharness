@@ -76,6 +76,8 @@ ANTHROPIC_API_KEY=sk-... .venv/bin/agentharness
 /skills                                  list loaded skills (and load failures)
 /skill <name>                            print a skill's SKILL.md body
 /tools                                   list registered tools
+/providers                               list providers and whether their keys are set
+/models                                  list models the active provider can reach
 /reload                                  re-scan the skills directory
 /usage                                   token usage for the active state
 /quit                                    exit
@@ -135,8 +137,9 @@ providers:
 
 ## Extending
 
-- **Add a tool** — write a handler and a `Tool` (see `tools/greet.py`), then
-  register it in `tools/registry.build_default_registry`.
+- **Add a tool** — write a handler and a `Tool` (see `tools/greet.py`, or
+  `tools/provider_tools.py` for one that exposes harness internals to the
+  model), then register it in `tools/registry.build_default_registry`.
 - **Add a skill** — create `skills/<name>/SKILL.md` with `name` (matching the
   directory) and `description` frontmatter. Optional `references/`, `assets/`,
   `scripts/` files are read as text via `read_skill_file`. Run `/reload`.

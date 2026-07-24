@@ -1,6 +1,9 @@
-"""Construct a Provider for a given name + config."""
+"""Construct a Provider for a given name + config, and report provider status."""
 
 from __future__ import annotations
+
+import os
+from dataclasses import dataclass
 
 from agentharness.config import Config
 from agentharness.providers.anthropic import AnthropicProvider
@@ -8,7 +11,35 @@ from agentharness.providers.base import Provider
 from agentharness.providers.gemini import GeminiProvider
 from agentharness.providers.openai_compatible import OpenAICompatibleProvider
 
-_KNOWN = ("anthropic", "openai", "gemini")
+# Single source of truth: provider name -> the env var its SDK reads its key
+# from. Keys are never handled by this code; we only report whether they exist.
+_ENV_VARS = {
+    "anthropic": "ANTHROPIC_API_KEY",
+    "openai": "OPENAI_API_KEY",
+    "gemini": "GEMINI_API_KEY",
+}
+_KNOWN = tuple(_ENV_VARS)
+
+
+@dataclass(frozen=True)
+class ProviderInfo:
+    name: str
+    env_var: str
+    available: bool  # env_var is set in the environment
+
+
+def provider_status() -> list[ProviderInfo]:
+    """Report each supported provider and whether its API key is set.
+
+    State-free: it does not know the active state. Callers that want to mark the
+    active provider do so themselves. ``available`` is a key-set heuristic — an
+    OpenAI-compatible provider aimed at a local base_url needs no key, so
+    ``available=False`` there does not imply "unusable".
+    """
+    return [
+        ProviderInfo(name=n, env_var=v, available=bool(os.environ.get(v)))
+        for n, v in _ENV_VARS.items()
+    ]
 
 
 def build_provider(name: str, model: str, config: Config) -> Provider:

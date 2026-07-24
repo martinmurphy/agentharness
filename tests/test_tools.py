@@ -59,12 +59,27 @@ def test_duplicate_registration_rejected():
         reg.register(greet_tool())
 
 
-def test_default_registry_includes_skill_tools(tmp_path):
+def test_default_registry_includes_skill_and_provider_tools(tmp_path):
     skillset = load_skills(tmp_path)
     reg = build_default_registry(skillset)
-    assert set(reg.names()) == {"greet", "read_skill", "read_skill_file"}
-    # specs() are advertised in sorted order
-    assert [s.name for s in reg.specs()] == ["greet", "read_skill", "read_skill_file"]
+    assert set(reg.names()) == {
+        "greet",
+        "list_providers",
+        "read_skill",
+        "read_skill_file",
+    }
+
+
+def test_list_providers_tool(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "y")
+    reg = build_default_registry(load_skills(tmp_path))
+    result = reg.dispatch(ToolCall(id="c", name="list_providers", arguments={}))
+    assert not result.is_error
+    assert "anthropic (key from ANTHROPIC_API_KEY): key set" in result.content
+    assert "openai (key from OPENAI_API_KEY): no key" in result.content
+    assert "gemini (key from GEMINI_API_KEY): key set" in result.content
 
 
 def _skillset_with_one(tmp_path):

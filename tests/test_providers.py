@@ -503,3 +503,26 @@ def test_gemini_list_models_filters_to_generate_content():
     provider = GeminiProvider("m", client=client)
     # sorted, prefix stripped, embeddings excluded
     assert provider.list_models() == ["gemini-3.5-flash", "gemini-3.5-pro"]
+
+
+# ---- provider_status / _KNOWN -----------------------------------------------
+
+
+def test_known_derived_from_env_vars():
+    from agentharness.providers.factory import _KNOWN
+
+    assert _KNOWN == ("anthropic", "openai", "gemini")
+
+
+def test_provider_status_reflects_env(monkeypatch):
+    from agentharness.providers.factory import provider_status
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "y")
+
+    status = {p.name: p for p in provider_status()}
+    assert status["anthropic"].available is True
+    assert status["anthropic"].env_var == "ANTHROPIC_API_KEY"
+    assert status["openai"].available is False
+    assert status["gemini"].available is True

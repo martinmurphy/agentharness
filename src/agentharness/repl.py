@@ -13,7 +13,7 @@ import sys
 from agentharness import agent
 from agentharness.config import Config, load_config
 from agentharness.providers.base import Message, Provider, TextBlock
-from agentharness.providers.factory import build_provider
+from agentharness.providers.factory import build_provider, provider_status
 from agentharness.skills.loader import SkillSet, load_skills
 from agentharness.state import StateManager
 from agentharness.tools.registry import ToolRegistry, build_default_registry
@@ -133,6 +133,7 @@ Commands:
   /skills                                  list loaded skills (and load failures)
   /skill <name>                            print a skill's SKILL.md body
   /tools                                   list registered tools
+  /providers                               list supported providers and whether keys are set
   /models                                  list models the active provider can reach
   /reload                                  re-scan the skills directory
   /usage                                   token usage for the active state
@@ -143,6 +144,21 @@ _NEW_PARSER = argparse.ArgumentParser(prog="/new", add_help=False)
 _NEW_PARSER.add_argument("name")
 _NEW_PARSER.add_argument("--provider")
 _NEW_PARSER.add_argument("--model")
+
+
+def _list_providers(h: Harness) -> None:
+    """Print supported providers, their key env var, and whether it is set.
+
+    Marks the active state's provider. Reads only the environment (no key is
+    handled, no network call), so it works without any credentials configured.
+    """
+    a = h.ansi
+    active = h.states.active.provider_name
+    for p in provider_status():
+        avail = a.green("key set") if p.available else a.red("no key")
+        mark = a.green(" *") if p.name == active else "  "
+        suffix = "  (active)" if p.name == active else ""
+        print(f"{mark} {p.name:10} {p.env_var:20} {avail}{suffix}")
 
 
 def _list_models(h: Harness) -> None:
@@ -242,6 +258,8 @@ def _handle_command(h: Harness, line: str) -> bool:
     elif cmd == "/tools":
         for spec in h.registry.specs():
             print(f"  {a.bold(spec.name)}: {_truncate(spec.description, 120)}")
+    elif cmd == "/providers":
+        _list_providers(h)
     elif cmd == "/models":
         _list_models(h)
     elif cmd == "/reload":
