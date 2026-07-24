@@ -1,0 +1,292 @@
+"""Wire-format mapping tests for both providers. No network.
+
+Each provider is given a fake client that records the request it was handed and
+returns a canned SDK-shaped response, so we test the mapping in both directions
+without a live model.
+"""
+
+from __future__ import annotations
+
+import json
+from types import SimpleNamespace
+
+from agentharness.providers.anthropic import AnthropicProvider
+from agentharness.providers.base import (
+    Message,
+    TextBlock,
+    ThinkingBlock,
+    ToolCall,
+    ToolResult,
+    ToolSpec,
+)
+from agentharness.providers.openai_compatible import OpenAICompatibleProvider
+
+TOOLS = [
+    ToolSpec(
+        name="greet",
+        description="Greet someone.",
+        input_schema={"type": "object", "properties": {"name": {"type": "string"}}},
+    )
+]
+
+
+# ---- Anthropic --------------------------------------------------------------
+
+
+class FakeAnthropicClient:
+    def __init__(self, response):
+        self._response = response
+        self.captured = None
+
+        self.messages = SimpleNamespace(create=self._create)
+
+    def _create(self, **kwargs):
+        self.captured = kwargs
+        return self._response
+
+
+def _anthropic_response(content, stop_reason="end_turn"):
+    return SimpleNamespace(
+        content=content,
+        stop_reason=stop_reason,
+        usage=SimpleNamespace(input_tokens=11, output_tokens=7),
+    )
+
+
+def test_anthropic_request_shape():
+    text = SimpleNamespace(type="text", text="hi")
+    client = FakeAnthropicClient(_anthropic_response([text]))
+    provider = AnthropicProvider("claude-opus-4-8", client=client, effort="high")
+
+    resp = provider.chat(
+        system="SYS",
+        messages=[Message(role="user", blocks=[TextBlock("hello")])],
+        tools=TOOLS,
+        max_tokens=100,
+    )
+
+    req = client.captured
+    assert req["model"] == "claude-opus-4-8"
+    assert req["system"] == "SYS"
+    assert req["thinking"] == {"type": "adaptive"}
+    assert req["output_config"] == {"effort": "high"}
+    assert "temperature" not in req and "top_p" not in req  # rejected on this model
+    assert req["messages"] == [{"role": "user", "content": "hello"}]
+    assert req["tools"][0]["name"] == "greet"
+    assert "input_schema" in req["tools"][0]
+
+    assert resp.stop_reason == "end_turn"
+    assert resp.message.text() == "hi"
+    assert resp.usage.input_tokens == 11
+    assert resp.usage.output_tokens == 7
+
+
+def test_anthropic_show_thinking_flag():
+    client = FakeAnthropicClient(_anthropic_response([]))
+    provider = AnthropicProvider("m", client=client, show_thinking=True)
+    provider.chat(system="", messages=[], tools=[], max_tokens=10)
+    assert client.captured["thinking"] == {"type": "adaptive", "display": "summarized"}
+
+
+def test_anthropic_parses_tool_use():
+    tu = SimpleNamespace(type="tool_use", id="toolu_1", name="greet", input={"name": "Ada"})
+    client = FakeAnthropicClient(_anthropic_response([tu], stop_reason="tool_use"))
+    provider = AnthropicProvider("m", client=client)
+    resp = provider.chat(system="", messages=[], tools=TOOLS, max_tokens=10)
+    assert resp.stop_reason == "tool_use"
+    calls = resp.message.tool_calls()
+    assert len(calls) == 1
+    assert calls[0].id == "toolu_1"
+    assert calls[0].arguments == {"name": "Ada"}
+
+
+def test_anthropic_refusal_stop_reason():
+    client = FakeAnthropicClient(_anthropic_response([], stop_reason="refusal"))
+    provider = AnthropicProvider("m", client=client)
+    resp = provider.chat(system="", messages=[], tools=[], max_tokens=10)
+    assert resp.stop_reason == "refusal"
+
+
+def test_anthropic_provider_raw_replayed_verbatim():
+    # A thinking block has no neutral form; it must survive via provider_raw.
+    thinking = SimpleNamespace(type="thinking", thinking="secret reasoning", signature="sig")
+    tu = SimpleNamespace(type="tool_use", id="toolu_1", name="greet", input={"name": "Ada"})
+    client = FakeAnthropicClient(_anthropic_response([thinking, tu], stop_reason="tool_use"))
+    provider = AnthropicProvider("m", client=client)
+    resp = provider.chat(system="", messages=[], tools=TOOLS, max_tokens=10)
+
+    # provider_raw holds the original SDK blocks, including the signed thinking.
+    assert resp.message.provider_raw == [thinking, tu]
+
+    # Replaying that assistant message sends the raw blocks back unchanged.
+    follow = provider.chat(
+        system="",
+        messages=[
+            Message(role="user", blocks=[TextBlock("go")]),
+            resp.message,
+            Message(role="tool", blocks=[ToolResult(call_id="toolu_1", content="ok")]),
+        ],
+        tools=TOOLS,
+        max_tokens=10,
+    )
+    sent = client.captured["messages"]
+    assert sent[1]["role"] == "assistant"
+    assert sent[1]["content"] is resp.message.provider_raw  # verbatim, incl. thinking
+    # tool result packed into ONE user message
+    assert sent[2] == {
+        "role": "user",
+        "content": [
+            {"type": "tool_result", "tool_use_id": "toolu_1", "content": "ok", "is_error": False}
+        ],
+    }
+    assert follow.message.text() == ""
+
+
+def test_anthropic_multiple_tool_results_packed_into_one_message():
+    client = FakeAnthropicClient(_anthropic_response([]))
+    provider = AnthropicProvider("m", client=client)
+    provider.chat(
+        system="",
+        messages=[
+            Message(
+                role="tool",
+                blocks=[
+                    ToolResult(call_id="a", content="1"),
+                    ToolResult(call_id="b", content="2", is_error=True),
+                ],
+            )
+        ],
+        tools=[],
+        max_tokens=10,
+    )
+    sent = client.captured["messages"]
+    assert len(sent) == 1
+    assert sent[0]["role"] == "user"
+    assert len(sent[0]["content"]) == 2  # both results in one message
+
+
+# ---- OpenAI-compatible ------------------------------------------------------
+
+
+class FakeOpenAIClient:
+    def __init__(self, response):
+        self._response = response
+        self.captured = None
+        self.chat = SimpleNamespace(
+            completions=SimpleNamespace(create=self._create)
+        )
+
+    def _create(self, **kwargs):
+        self.captured = kwargs
+        return self._response
+
+
+def _openai_response(*, content=None, tool_calls=None, finish_reason="stop"):
+    message = SimpleNamespace(content=content, tool_calls=tool_calls)
+    choice = SimpleNamespace(message=message, finish_reason=finish_reason)
+    return SimpleNamespace(
+        choices=[choice],
+        usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3),
+    )
+
+
+def _oa_tool_call(id_, name, args_json):
+    return SimpleNamespace(
+        id=id_, function=SimpleNamespace(name=name, arguments=args_json)
+    )
+
+
+def test_openai_request_shape_and_system_message():
+    client = FakeOpenAIClient(_openai_response(content="hi"))
+    provider = OpenAICompatibleProvider("gpt-4o", client=client)
+    resp = provider.chat(
+        system="SYS",
+        messages=[Message(role="user", blocks=[TextBlock("hello")])],
+        tools=TOOLS,
+        max_tokens=100,
+    )
+    req = client.captured
+    assert req["messages"][0] == {"role": "system", "content": "SYS"}
+    assert req["messages"][1] == {"role": "user", "content": "hello"}
+    assert req["tools"][0]["type"] == "function"
+    assert req["tools"][0]["function"]["parameters"] == TOOLS[0].input_schema
+    assert req["tool_choice"] == "auto"
+    assert resp.message.text() == "hi"
+    assert resp.usage.input_tokens == 5
+
+
+def test_openai_parses_tool_call_json_arguments():
+    tc = _oa_tool_call("call_1", "greet", json.dumps({"name": "Ada"}))
+    client = FakeOpenAIClient(_openai_response(tool_calls=[tc], finish_reason="tool_calls"))
+    provider = OpenAICompatibleProvider("m", client=client)
+    resp = provider.chat(system="", messages=[], tools=TOOLS, max_tokens=10)
+    assert resp.stop_reason == "tool_use"
+    calls = resp.message.tool_calls()
+    assert calls[0].arguments == {"name": "Ada"}  # parsed from JSON string
+
+
+def test_openai_bad_arguments_json_becomes_empty_dict():
+    tc = _oa_tool_call("call_1", "greet", "{not json")
+    client = FakeOpenAIClient(_openai_response(tool_calls=[tc], finish_reason="tool_calls"))
+    provider = OpenAICompatibleProvider("m", client=client)
+    resp = provider.chat(system="", messages=[], tools=TOOLS, max_tokens=10)
+    assert resp.message.tool_calls()[0].arguments == {}
+
+
+def test_openai_tool_results_fan_out_to_separate_messages():
+    client = FakeOpenAIClient(_openai_response(content="done"))
+    provider = OpenAICompatibleProvider("m", client=client)
+    provider.chat(
+        system="S",
+        messages=[
+            Message(
+                role="tool",
+                blocks=[
+                    ToolResult(call_id="a", content="1"),
+                    ToolResult(call_id="b", content="2"),
+                ],
+            )
+        ],
+        tools=[],
+        max_tokens=10,
+    )
+    sent = client.captured["messages"]
+    # system + two separate tool messages
+    tool_msgs = [m for m in sent if m["role"] == "tool"]
+    assert len(tool_msgs) == 2
+    assert tool_msgs[0]["tool_call_id"] == "a"
+    assert tool_msgs[1]["tool_call_id"] == "b"
+
+
+def test_openai_assistant_replay_uses_provider_raw():
+    tc = _oa_tool_call("call_1", "greet", json.dumps({"name": "Ada"}))
+    client = FakeOpenAIClient(_openai_response(tool_calls=[tc], finish_reason="tool_calls"))
+    provider = OpenAICompatibleProvider("m", client=client)
+    resp = provider.chat(system="", messages=[], tools=TOOLS, max_tokens=10)
+
+    provider.chat(
+        system="S",
+        messages=[Message(role="user", blocks=[TextBlock("hi")]), resp.message],
+        tools=TOOLS,
+        max_tokens=10,
+    )
+    sent = client.captured["messages"]
+    assistant = sent[2]
+    assert assistant["role"] == "assistant"
+    assert assistant["tool_calls"][0]["function"]["name"] == "greet"
+
+
+def test_anthropic_assistant_fallback_without_provider_raw():
+    # A synthetic assistant message (no provider_raw) reconstructs from blocks.
+    client = FakeAnthropicClient(_anthropic_response([]))
+    provider = AnthropicProvider("m", client=client)
+    synthetic = Message(
+        role="assistant",
+        blocks=[TextBlock("thinking done"), ThinkingBlock("hidden"),
+                ToolCall(id="t1", name="greet", arguments={"name": "X"})],
+    )
+    provider.chat(system="", messages=[synthetic], tools=TOOLS, max_tokens=10)
+    content = client.captured["messages"][0]["content"]
+    types = [b["type"] for b in content]
+    assert "text" in types and "tool_use" in types
+    assert "thinking" not in types  # cannot reconstruct signed thinking

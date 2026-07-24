@@ -12,6 +12,7 @@ from agentharness.providers.base import (
     ToolSpec,
     Usage,
 )
+from agentharness.providers.factory import build_provider
 
 __all__ = [
     "Block",
@@ -24,4 +25,5 @@ __all__ = [
     "ToolResult",
     "ToolSpec",
     "Usage",
+    "build_provider",
 ]
