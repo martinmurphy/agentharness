@@ -315,3 +315,45 @@ def test_list_models_tool_unsupported_provider(tmp_path, monkeypatch):
     result = h.registry.dispatch(TC(id="c", name="list_models", arguments={}))
     assert result.is_error
     assert "cannot list models" in result.content
+
+
+def test_list_models_named_provider_builds_via_factory(tmp_path, monkeypatch):
+    from agentharness import repl
+    from agentharness.providers.base import ToolCall as TC
+
+    class ListingProvider(FakeProvider):
+        def list_models(self):
+            return ["built-1"]
+
+    built = {}
+
+    def fake_build(name, model, config):
+        built["name"] = name
+        return ListingProvider([])
+
+    monkeypatch.setattr(repl, "build_provider", fake_build)
+    h = repl.Harness(Config(skills_dir=str(tmp_path)))  # active = anthropic
+    result = h.registry.dispatch(TC(id="c", name="list_models", arguments={"provider": "gemini"}))
+    assert not result.is_error
+    assert "built-1" in result.content
+    assert built["name"] == "gemini"  # a fresh provider was built for the non-active name
+
+
+def test_list_models_all_via_harness(tmp_path, monkeypatch):
+    from agentharness import repl
+    from agentharness.providers.base import ToolCall as TC
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+
+    class ListingProvider(FakeProvider):
+        def list_models(self):
+            return ["m"]
+
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: ListingProvider([]))
+    h = repl.Harness(Config(skills_dir=str(tmp_path)))
+    result = h.registry.dispatch(TC(id="c", name="list_models", arguments={"provider": "all"}))
+    assert not result.is_error
+    for name in ("anthropic", "openai", "gemini"):
+        assert f"{name}:" in result.content

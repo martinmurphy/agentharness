@@ -71,32 +71,79 @@ def test_default_registry_includes_skill_and_provider_tools(tmp_path):
     }
 
 
-def test_list_models_tool():
+def _models_tool(active="anthropic", by_name=None):
+    """Build a list_models tool over fake closures.
+
+    ``by_name`` maps provider name -> list of models (or raises if a name is
+    absent, mimicking a missing-key error).
+    """
+    by_name = by_name or {}
+
+    def list_for(name):
+        if name not in by_name:
+            raise RuntimeError(f"no key for {name}")
+        return by_name[name]
+
     reg = ToolRegistry()
-    reg.register(list_models_tool(lambda: ["model-a", "model-b"]))
-    result = reg.dispatch(ToolCall(id="c", name="list_models", arguments={}))
+    reg.register(list_models_tool(lambda: active, list_for))
+    return reg
+
+
+def _dispatch(reg, args):
+    return reg.dispatch(ToolCall(id="c", name="list_models", arguments=args))
+
+
+def test_list_models_active_provider_default():
+    reg = _models_tool(active="anthropic", by_name={"anthropic": ["model-a", "model-b"]})
+    result = _dispatch(reg, {})
     assert not result.is_error
+    assert "anthropic:" in result.content
     assert "model-a" in result.content and "model-b" in result.content
 
 
-def test_list_models_tool_surfaces_errors():
-    reg = ToolRegistry()
-
-    def _boom():
-        raise RuntimeError("network down")
-
-    reg.register(list_models_tool(_boom))
-    result = reg.dispatch(ToolCall(id="c", name="list_models", arguments={}))
-    assert result.is_error
-    assert "network down" in result.content
-
-
-def test_list_models_tool_empty():
-    reg = ToolRegistry()
-    reg.register(list_models_tool(list))
-    result = reg.dispatch(ToolCall(id="c", name="list_models", arguments={}))
+def test_list_models_named_provider():
+    reg = _models_tool(active="anthropic", by_name={"gemini": ["g-1", "g-2"]})
+    result = _dispatch(reg, {"provider": "gemini"})
     assert not result.is_error
-    assert "No models" in result.content
+    assert "gemini:" in result.content and "g-1" in result.content
+
+
+def test_list_models_unknown_provider():
+    reg = _models_tool()
+    result = _dispatch(reg, {"provider": "bogus"})
+    assert result.is_error
+    assert "unknown provider" in result.content
+
+
+def test_list_models_named_provider_missing_key_errors():
+    reg = _models_tool(by_name={})  # list_for raises for any name
+    result = _dispatch(reg, {"provider": "gemini"})
+    assert result.is_error
+    assert "no key for gemini" in result.content
+
+
+def test_list_models_all_reports_available_and_unavailable(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("GEMINI_API_KEY", "y")
+    # list_for succeeds for the two available ones; openai is skipped (no key).
+    reg = _models_tool(by_name={"anthropic": ["c-1"], "gemini": ["g-1"]})
+    result = _dispatch(reg, {"provider": "all"})
+    assert not result.is_error
+    assert "c-1" in result.content and "g-1" in result.content
+    assert "openai: (no key set" in result.content   # unavailable noted, not fetched
+
+
+def test_list_models_all_reports_per_provider_error(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
+    monkeypatch.setenv("OPENAI_API_KEY", "x")
+    monkeypatch.setenv("GEMINI_API_KEY", "x")
+    # gemini available (key set) but list_for raises -> reported, others still listed.
+    reg = _models_tool(by_name={"anthropic": ["c-1"], "openai": ["o-1"]})
+    result = _dispatch(reg, {"provider": "all"})
+    assert not result.is_error
+    assert "c-1" in result.content and "o-1" in result.content
+    assert "gemini: error:" in result.content        # one failure doesn't abort "all"
 
 
 def test_list_providers_tool(tmp_path, monkeypatch):

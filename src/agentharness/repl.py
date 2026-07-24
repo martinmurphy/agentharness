@@ -73,17 +73,30 @@ class Harness:
     def _build_registry(self) -> ToolRegistry:
         """Default (state-free) tools plus the state-dependent list_models tool."""
         registry = build_default_registry(self.skillset)
-        registry.register(list_models_tool(self._active_model_ids))
+        registry.register(
+            list_models_tool(
+                lambda: self.states.active.provider_name,
+                self._list_models_for,
+            )
+        )
         return registry
 
-    def _active_model_ids(self) -> list[str]:
-        """Model IDs on the active state's provider (for the list_models tool)."""
-        provider = self.states.active.provider
+    def _list_models_for(self, provider_name: str) -> list[str]:
+        """Model IDs for a named provider (for the list_models tool).
+
+        Reuses the active provider instance when it matches; otherwise builds a
+        throwaway provider via the factory. The model passed to the factory is a
+        placeholder — listing hits the provider's models endpoint and never uses
+        the configured model. Building/listing needs that provider's API key set.
+        """
+        active = self.states.active
+        if provider_name == active.provider_name:
+            provider = active.provider
+        else:
+            provider = build_provider(provider_name, "(model-list)", self.config)
         lister = getattr(provider, "list_models", None)
         if lister is None:
-            raise ValueError(
-                f"provider {self.states.active.provider_name!r} cannot list models"
-            )
+            raise ValueError(f"provider {provider_name!r} cannot list models")
         return lister()
 
     def effective_system(self) -> str:
