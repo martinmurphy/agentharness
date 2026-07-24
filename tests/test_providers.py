@@ -34,11 +34,15 @@ TOOLS = [
 
 
 class FakeAnthropicClient:
-    def __init__(self, response):
+    def __init__(self, response, models=None):
         self._response = response
         self.captured = None
 
         self.messages = SimpleNamespace(create=self._create)
+        # models.list() returns an iterable of objects with .id
+        self.models = SimpleNamespace(
+            list=lambda: [SimpleNamespace(id=m) for m in (models or [])]
+        )
 
     def _create(self, **kwargs):
         self.captured = kwargs
@@ -169,11 +173,15 @@ def test_anthropic_multiple_tool_results_packed_into_one_message():
 
 
 class FakeOpenAIClient:
-    def __init__(self, response):
+    def __init__(self, response, models=None):
         self._response = response
         self.captured = None
         self.chat = SimpleNamespace(
             completions=SimpleNamespace(create=self._create)
+        )
+        # models.list() returns an object with a .data list of objects with .id
+        self.models = SimpleNamespace(
+            list=lambda: SimpleNamespace(data=[SimpleNamespace(id=m) for m in (models or [])])
         )
 
     def _create(self, **kwargs):
@@ -296,14 +304,24 @@ def test_anthropic_assistant_fallback_without_provider_raw():
 
 
 class FakeGeminiClient:
-    def __init__(self, response):
+    def __init__(self, response, models=None):
         self._response = response
         self.captured = None
-        self.models = SimpleNamespace(generate_content=self._generate)
+        # models is a list of (name, supported_actions) tuples
+        self._models = models or []
+        self.models = SimpleNamespace(
+            generate_content=self._generate, list=self._list
+        )
 
     def _generate(self, *, model, contents, config):
         self.captured = {"model": model, "contents": contents, "config": config}
         return self._response
+
+    def _list(self):
+        return [
+            SimpleNamespace(name=name, supported_actions=actions)
+            for name, actions in self._models
+        ]
 
 
 def _gemini_response(parts, finish_reason="STOP"):
@@ -454,3 +472,34 @@ def test_gemini_error_tool_result_wrapped_as_error():
     )
     fr = client.captured["contents"][1].parts[0].function_response
     assert fr.response == {"error": "boom"}
+
+
+# ---- list_models ------------------------------------------------------------
+
+
+def test_anthropic_list_models():
+    client = FakeAnthropicClient(_anthropic_response([]), models=["claude-opus-4-8", "claude-haiku-4-5"])
+    provider = AnthropicProvider("m", client=client)
+    assert provider.list_models() == ["claude-haiku-4-5", "claude-opus-4-8"]  # sorted
+
+
+def test_openai_list_models():
+    client = FakeOpenAIClient(_openai_response(content="x"), models=["gpt-4o", "gpt-4o-mini"])
+    provider = OpenAICompatibleProvider("m", client=client)
+    assert provider.list_models() == ["gpt-4o", "gpt-4o-mini"]
+
+
+def test_gemini_list_models_filters_to_generate_content():
+    from agentharness.providers.gemini import GeminiProvider
+
+    client = FakeGeminiClient(
+        _gemini_response([]),
+        models=[
+            ("models/gemini-3.5-flash", ["generateContent", "countTokens"]),
+            ("models/text-embedding-004", ["embedContent"]),  # excluded
+            ("models/gemini-3.5-pro", ["generateContent"]),
+        ],
+    )
+    provider = GeminiProvider("m", client=client)
+    # sorted, prefix stripped, embeddings excluded
+    assert provider.list_models() == ["gemini-3.5-flash", "gemini-3.5-pro"]

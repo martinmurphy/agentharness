@@ -175,3 +175,6 @@ class OpenAICompatibleProvider:
             output_tokens=getattr(usage_obj, "completion_tokens", 0) or 0,
         )
         return ProviderResponse(message=assistant, stop_reason=stop_reason, usage=usage)
+
+    def list_models(self) -> list[str]:
+        return sorted(m.id for m in self._client.models.list().data)

@@ -128,3 +128,11 @@ class Provider(Protocol):
         tools: list[ToolSpec],
         max_tokens: int,
     ) -> ProviderResponse: ...
+
+    def list_models(self) -> list[str]:
+        """Model IDs this provider's credentials can reach (text-capable).
+
+        Optional: providers may raise ``NotImplementedError``. Callers should
+        also tolerate its absence and any SDK/network error.
+        """
+        ...

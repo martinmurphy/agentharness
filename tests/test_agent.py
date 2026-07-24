@@ -230,3 +230,39 @@ def test_repl_new_with_flags(tmp_path, monkeypatch):
     assert st.name == "alt"
     assert st.provider_name == "openai"
     assert st.model == "gpt-4o"
+
+
+def test_repl_models_lists_and_marks_current(tmp_path, monkeypatch, capsys):
+    from agentharness import repl
+
+    class ListingProvider(FakeProvider):
+        def list_models(self):
+            return ["fake-1", "fake-2"]
+
+    prov = ListingProvider([])
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: prov)
+    h = repl.Harness(Config(skills_dir=str(tmp_path), model="fake-1"))
+    repl._handle_command(h, "/models")
+    out = capsys.readouterr().out
+    assert "fake-1" in out and "fake-2" in out
+    assert "*" in out  # current model marked
+
+
+def test_repl_models_provider_without_support(tmp_path, monkeypatch, capsys):
+    h, repl = _harness(tmp_path, monkeypatch)  # FakeProvider has no list_models
+    repl._handle_command(h, "/models")
+    assert "does not support" in capsys.readouterr().out
+
+
+def test_repl_models_surfaces_errors(tmp_path, monkeypatch, capsys):
+    from agentharness import repl
+
+    class FailingProvider(FakeProvider):
+        def list_models(self):
+            raise RuntimeError("boom")
+
+    prov = FailingProvider([])
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: prov)
+    h = repl.Harness(Config(skills_dir=str(tmp_path)))
+    repl._handle_command(h, "/models")
+    assert "boom" in capsys.readouterr().out

@@ -133,6 +133,7 @@ Commands:
   /skills                                  list loaded skills (and load failures)
   /skill <name>                            print a skill's SKILL.md body
   /tools                                   list registered tools
+  /models                                  list models the active provider can reach
   /reload                                  re-scan the skills directory
   /usage                                   token usage for the active state
   /quit                                    exit
@@ -142,6 +143,36 @@ _NEW_PARSER = argparse.ArgumentParser(prog="/new", add_help=False)
 _NEW_PARSER.add_argument("name")
 _NEW_PARSER.add_argument("--provider")
 _NEW_PARSER.add_argument("--model")
+
+
+def _list_models(h: Harness) -> None:
+    """Print the models the active state's provider+credentials can reach.
+
+    Builds the provider (lazily) and makes a network call, so it needs a valid
+    key. Guarded against providers that don't implement listing and against
+    SDK/network errors, so it never crashes the REPL.
+    """
+    a = h.ansi
+    state = h.states.active
+    lister = getattr(state.provider, "list_models", None)
+    if lister is None:
+        print(a.red(f"provider {state.provider_name!r} does not support /models"))
+        return
+    try:
+        models = lister()
+    except NotImplementedError:
+        print(a.red(f"provider {state.provider_name!r} does not support /models"))
+        return
+    except Exception as exc:  # noqa: BLE001 - surface auth/network errors, keep REPL alive
+        print(a.red(f"[error] {type(exc).__name__}: {exc}"))
+        return
+    if not models:
+        print("  (no models returned)")
+        return
+    print(a.dim(f"{len(models)} model(s) reachable by {state.provider_name}:"))
+    for mid in models:
+        mark = a.green(" *") if mid == state.model else "  "
+        print(f"{mark} {mid}")
 
 
 def _handle_command(h: Harness, line: str) -> bool:
@@ -211,6 +242,8 @@ def _handle_command(h: Harness, line: str) -> bool:
     elif cmd == "/tools":
         for spec in h.registry.specs():
             print(f"  {a.bold(spec.name)}: {_truncate(spec.description, 120)}")
+    elif cmd == "/models":
+        _list_models(h)
     elif cmd == "/reload":
         h.reload_skills()
         n = len(h.skillset.skills)

@@ -224,3 +224,13 @@ class GeminiProvider:
             output_tokens=getattr(um, "candidates_token_count", 0) or 0,
         )
         return ProviderResponse(message=assistant, stop_reason=stop_reason, usage=usage)
+
+    def list_models(self) -> list[str]:
+        # Keep only models that can generate content (excludes embeddings, etc.),
+        # and strip the "models/" prefix so the ids are usable with /new --model.
+        out: list[str] = []
+        for m in self._client.models.list():
+            actions = getattr(m, "supported_actions", None) or []
+            if "generateContent" in actions and m.name:
+                out.append(m.name.split("/")[-1])
+        return sorted(out)
