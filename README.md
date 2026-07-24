@@ -89,7 +89,7 @@ Each state can target a different backend:
 
 ```
 /new research --provider openai --model gpt-4o
-/new gem      --provider gemini --model gemini-2.5-flash
+/new gem      --provider gemini --model gemini-3.5-flash
 ```
 
 ## Configuration
@@ -105,7 +105,16 @@ Gemini uses the **AI Studio (Developer API)** path — get a key at
 
 ```yaml
 provider: gemini
-model: gemini-2.5-flash        # or gemini-2.5-pro
+model: gemini-3.5-flash        # a current flash model with free-tier quota
+```
+
+Model IDs change over time and vary by account. If a model 404s ("no longer
+available to new users") or 429s with `limit: 0` (pro tiers need billing), list
+what your key can reach:
+
+```bash
+curl -s "https://generativelanguage.googleapis.com/v1beta/models?key=$GEMINI_API_KEY&pageSize=200" \
+  | python3 -c "import sys,json; [print(m['name'].split('/')[-1]) for m in json.load(sys.stdin).get('models',[]) if 'generateContent' in m.get('supportedGenerationMethods',[])]"
 ```
 
 Pass it to the container the same way as the others:
