@@ -32,6 +32,12 @@ _STOP_MAP: dict[str, StopReason] = {
 }
 
 
+def _adaptive_unsupported(exc: Exception) -> bool:
+    """True if a 400 says adaptive thinking / effort is unsupported by the model."""
+    msg = str(getattr(exc, "message", None) or exc).lower()
+    return "not supported" in msg and ("thinking" in msg or "effort" in msg)
+
+
 class AnthropicProvider:
     name = "anthropic"
 
@@ -47,6 +53,11 @@ class AnthropicProvider:
         self.model = model
         self.effort = effort
         self.show_thinking = show_thinking
+        # Adaptive thinking + effort are supported on current models (Opus 4.6+,
+        # Sonnet 4.6+, …) but 400 on older ones (Haiku 4.5, Sonnet 4.5, …). We
+        # try them, and on that specific 400 drop them and remember it for this
+        # instance so later turns skip straight to the plain request.
+        self._supports_adaptive = True
         if client is None:
             import anthropic
 
@@ -139,6 +150,27 @@ class AnthropicProvider:
 
     # ---- the protocol method ------------------------------------------------
 
+    def _create(
+        self,
+        *,
+        system: str,
+        messages: list[Message],
+        tools: list[ToolSpec],
+        max_tokens: int,
+        adaptive: bool,
+    ):
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": max_tokens,
+            "system": system,
+            "messages": self._to_wire_messages(messages),
+            "tools": self._tool_specs(tools),
+        }
+        if adaptive:
+            kwargs["thinking"] = self._thinking()
+            kwargs["output_config"] = {"effort": self.effort}
+        return self._client.messages.create(**kwargs)
+
     def chat(
         self,
         *,
@@ -147,15 +179,18 @@ class AnthropicProvider:
         tools: list[ToolSpec],
         max_tokens: int,
     ) -> ProviderResponse:
-        resp = self._client.messages.create(
-            model=self.model,
-            max_tokens=max_tokens,
-            system=system,
-            messages=self._to_wire_messages(messages),
-            tools=self._tool_specs(tools),
-            thinking=self._thinking(),
-            output_config={"effort": self.effort},
-        )
+        import anthropic
+
+        call = {"system": system, "messages": messages, "tools": tools, "max_tokens": max_tokens}
+        try:
+            resp = self._create(**call, adaptive=self._supports_adaptive)
+        except anthropic.BadRequestError as exc:
+            if not (self._supports_adaptive and _adaptive_unsupported(exc)):
+                raise
+            # This model rejects adaptive thinking / effort; retry without them
+            # and skip them from now on.
+            self._supports_adaptive = False
+            resp = self._create(**call, adaptive=False)
 
         stop_reason: StopReason = _STOP_MAP.get(resp.stop_reason or "", "other")
         blocks = self._parse_content(resp.content)

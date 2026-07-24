@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
+
 from agentharness.providers.anthropic import AnthropicProvider
 from agentharness.providers.base import (
     Message,
@@ -109,6 +111,69 @@ def test_anthropic_refusal_stop_reason():
     provider = AnthropicProvider("m", client=client)
     resp = provider.chat(system="", messages=[], tools=[], max_tokens=10)
     assert resp.stop_reason == "refusal"
+
+
+class _AdaptiveRejectingClient:
+    """Raises BadRequestError whenever a request includes adaptive thinking,
+    succeeds otherwise. Models the older-model (e.g. Haiku 4.5) behaviour."""
+
+    def __init__(self, response):
+        import httpx
+
+        self._response = response
+        self._httpx = httpx
+        self.calls: list[dict] = []
+        self.messages = SimpleNamespace(create=self._create)
+
+    def _create(self, **kwargs):
+        import anthropic
+
+        self.calls.append(kwargs)
+        if "thinking" in kwargs:
+            resp = self._httpx.Response(400, request=self._httpx.Request("POST", "http://x"))
+            raise anthropic.BadRequestError(
+                "adaptive thinking is not supported on this model",
+                response=resp,
+                body=None,
+            )
+        return self._response
+
+
+def test_anthropic_falls_back_when_adaptive_unsupported():
+    client = _AdaptiveRejectingClient(_anthropic_response([SimpleNamespace(type="text", text="hi")]))
+    provider = AnthropicProvider("claude-haiku-4-5", client=client)
+
+    resp = provider.chat(system="S", messages=[], tools=[], max_tokens=10)
+    assert resp.message.text() == "hi"
+    # first attempt sent adaptive thinking; retry dropped thinking + output_config
+    assert len(client.calls) == 2
+    assert "thinking" in client.calls[0]
+    assert "thinking" not in client.calls[1]
+    assert "output_config" not in client.calls[1]
+    assert provider._supports_adaptive is False
+
+    # subsequent turn goes straight to the plain request — no wasted 400
+    client.calls.clear()
+    provider.chat(system="S", messages=[], tools=[], max_tokens=10)
+    assert len(client.calls) == 1
+    assert "thinking" not in client.calls[0]
+
+
+def test_anthropic_other_bad_request_not_swallowed():
+    import anthropic
+    import httpx
+
+    class _AlwaysBad:
+        def __init__(self):
+            self.messages = SimpleNamespace(create=self._create)
+
+        def _create(self, **kwargs):
+            resp = httpx.Response(400, request=httpx.Request("POST", "http://x"))
+            raise anthropic.BadRequestError("model: invalid model name", response=resp, body=None)
+
+    provider = AnthropicProvider("bogus", client=_AlwaysBad())
+    with pytest.raises(anthropic.BadRequestError):
+        provider.chat(system="", messages=[], tools=[], max_tokens=10)
 
 
 def test_anthropic_provider_raw_replayed_verbatim():
