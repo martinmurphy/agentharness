@@ -28,3 +28,26 @@ one-liner, and it isn't required for correctness.
 - A one-time dim REPL notice the first time a state falls back — thread the fact
   from the provider to the REPL (a small "last fallback" flag the REPL checks
   after a turn, or a dedicated event the loop renders).
+
+## SSRF guardrails for the web_fetch tool
+
+**Problem.** The `web_fetch` tool (`src/agentharness/tools/web_tools.py`) lets
+the model make arbitrary outbound HTTP(S) requests. It restricts the scheme to
+http/https, caps the response body, and sets a timeout, but it does **not**
+block requests to private/loopback addresses or cloud metadata endpoints
+(169.254.169.254, `localhost`, RFC 1918 ranges, `.internal`, …). A model that is
+prompt-injected by fetched content could be steered into probing internal
+services or exfiltrating instance credentials.
+
+**Why deferred.** Blocking loopback/private ranges outright would break a
+legitimate dev-harness use — hitting a local API or `localhost` test server. The
+right design is a *configurable* policy (default deny internal, opt-in
+allowlist), which is more than a one-liner and wasn't in the tool's initial ask.
+
+**Sketch of the fix.** A config option, e.g. `web_fetch: {allow_private: false,
+allowed_hosts: [...]}`. Resolve the URL's host to its IPs before the request and
+reject private/loopback/link-local/ULA ranges unless the host is on the
+allowlist (resolve-then-check, and guard against DNS-rebinding by pinning the
+resolved IP for the actual connection). Surface rejections as a normal tool
+error. Keep the default safe (deny internal) so the capability is opt-in for
+internal targets.

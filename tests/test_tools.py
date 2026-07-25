@@ -67,6 +67,7 @@ def test_default_registry_includes_skill_and_provider_tools(tmp_path):
     assert set(reg.names()) == {
         "greet",
         "list_providers",
+        "web_fetch",
         "read_skill",
         "read_skill_file",
     }
@@ -220,3 +221,149 @@ def test_spawn_subagent_tool_requires_task():
     result = reg.dispatch(ToolCall(id="c", name="spawn_subagent", arguments={}))
     assert result.is_error
     assert "task" in result.content
+
+
+# ---- web_fetch --------------------------------------------------------------
+
+
+class _FakeHTTPResponse:
+    def __init__(self, status=200, reason="OK", headers=None, body=b"hello"):
+        self.status = status
+        self.reason = reason
+        self.headers = headers or {"Content-Type": "text/plain"}
+        self._body = body
+
+    def read(self, n):
+        return self._body[:n]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _web_reg():
+    from agentharness.tools.web_tools import web_fetch_tool
+
+    reg = ToolRegistry()
+    reg.register(web_fetch_tool())
+    return reg
+
+
+def test_web_fetch_get(monkeypatch):
+    from agentharness.tools import web_tools
+
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["url"] = request.full_url
+        captured["method"] = request.method
+        captured["headers"] = dict(request.header_items())
+        return _FakeHTTPResponse(body=b'{"ok": true}',
+                                 headers={"Content-Type": "application/json"})
+
+    monkeypatch.setattr(web_tools.urllib.request, "urlopen", fake_urlopen)
+    result = _web_reg().dispatch(
+        ToolCall(id="c", name="web_fetch",
+                 arguments={"url": "https://example.com/api", "accept": "application/json"})
+    )
+    assert not result.is_error
+    assert "HTTP 200 OK" in result.content
+    assert '{"ok": true}' in result.content
+    assert captured["method"] == "GET"
+    # header keys are title-cased by urllib
+    assert captured["headers"].get("Accept") == "application/json"
+
+
+def test_web_fetch_post_sets_body_and_content_type(monkeypatch):
+    from agentharness.tools import web_tools
+
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["method"] = request.method
+        captured["data"] = request.data
+        captured["headers"] = dict(request.header_items())
+        return _FakeHTTPResponse(status=201, reason="Created", body=b"done")
+
+    monkeypatch.setattr(web_tools.urllib.request, "urlopen", fake_urlopen)
+    result = _web_reg().dispatch(
+        ToolCall(id="c", name="web_fetch", arguments={
+            "url": "https://example.com/api",
+            "method": "POST",
+            "body": "field=value",
+            "content_type": "application/x-www-form-urlencoded",
+        })
+    )
+    assert not result.is_error
+    assert "HTTP 201 Created" in result.content
+    assert captured["method"] == "POST"
+    assert captured["data"] == b"field=value"
+    assert captured["headers"].get("Content-type") == "application/x-www-form-urlencoded"
+
+
+def test_web_fetch_post_defaults_content_type_to_json(monkeypatch):
+    from agentharness.tools import web_tools
+
+    captured = {}
+
+    def fake_urlopen(request, timeout=None):
+        captured["headers"] = dict(request.header_items())
+        return _FakeHTTPResponse()
+
+    monkeypatch.setattr(web_tools.urllib.request, "urlopen", fake_urlopen)
+    _web_reg().dispatch(
+        ToolCall(id="c", name="web_fetch",
+                 arguments={"url": "https://x.test", "method": "POST", "body": "{}"})
+    )
+    assert captured["headers"].get("Content-type") == "application/json"
+
+
+def test_web_fetch_rejects_non_http_scheme():
+    result = _web_reg().dispatch(
+        ToolCall(id="c", name="web_fetch", arguments={"url": "file:///etc/passwd"})
+    )
+    assert result.is_error
+    assert "scheme" in result.content
+
+
+def test_web_fetch_requires_url():
+    result = _web_reg().dispatch(ToolCall(id="c", name="web_fetch", arguments={}))
+    assert result.is_error
+    assert "url" in result.content
+
+
+def test_web_fetch_returns_error_body(monkeypatch):
+    import urllib.error
+
+    from agentharness.tools import web_tools
+
+    def fake_urlopen(request, timeout=None):
+        raise urllib.error.HTTPError(
+            request.full_url, 404, "Not Found",
+            hdrs={"Content-Type": "text/plain"}, fp=None,
+        )
+
+    monkeypatch.setattr(web_tools.urllib.request, "urlopen", fake_urlopen)
+    result = _web_reg().dispatch(
+        ToolCall(id="c", name="web_fetch", arguments={"url": "https://x.test/missing"})
+    )
+    # a 4xx is not a tool error — it's a real HTTP response returned to the model
+    assert not result.is_error
+    assert "HTTP 404 Not Found" in result.content
+
+
+def test_web_fetch_truncates_large_body(monkeypatch):
+    from agentharness.tools import web_tools
+
+    big = b"a" * (web_tools._MAX_BYTES + 500)
+
+    monkeypatch.setattr(
+        web_tools.urllib.request, "urlopen",
+        lambda request, timeout=None: _FakeHTTPResponse(body=big),
+    )
+    result = _web_reg().dispatch(
+        ToolCall(id="c", name="web_fetch", arguments={"url": "https://x.test/big"})
+    )
+    assert "truncated" in result.content

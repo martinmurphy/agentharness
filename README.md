@@ -144,6 +144,12 @@ providers:
   or any named provider, or `all` of them whose keys are set; or
   `spawn_subagent`, which runs a nested agent) is registered by the harness
   instead — see `Harness._build_registry` in `repl.py`.
+- **Web access** — the `web_fetch` tool lets the model request an http/https URL
+  (GET or POST). For POST it takes a `body` and a `content_type` (the input
+  type); `accept` sets the desired response type. Built on stdlib `urllib`.
+  Note: this is an SSRF surface (it can reach internal hosts) — scheme is
+  restricted to http/https and the body is size-capped, but host allowlisting is
+  future work (see `docs/future-work.md`).
 - **Delegation** — the `spawn_subagent` tool lets the model create a fresh
   conversation state (defaulting to its own provider/model, or a different one),
   run a full tool/skill loop on it until it produces an answer, and get that

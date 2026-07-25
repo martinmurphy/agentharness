@@ -82,10 +82,12 @@ def build_default_registry(skillset) -> ToolRegistry:
     from agentharness.tools.greet import greet_tool
     from agentharness.tools.provider_tools import list_providers_tool
     from agentharness.tools.skill_tools import make_skill_tools
+    from agentharness.tools.web_tools import web_fetch_tool
 
     registry = ToolRegistry()
     registry.register(greet_tool())
     registry.register(list_providers_tool())
+    registry.register(web_fetch_tool())
     for tool in make_skill_tools(skillset):
         registry.register(tool)
     return registry
