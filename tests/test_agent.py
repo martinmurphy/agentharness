@@ -357,3 +357,80 @@ def test_list_models_all_via_harness(tmp_path, monkeypatch):
     assert not result.is_error
     for name in ("anthropic", "openai", "gemini"):
         assert f"{name}:" in result.content
+
+
+# ---- subagent delegation ----------------------------------------------------
+
+
+def _spawn_harness(tmp_path, monkeypatch, script, **cfg):
+    """Harness whose build_provider yields a scripted FakeProvider.
+
+    Only the subagent's provider is built when calling _spawn_subagent directly,
+    so the single script drives the subagent's turn loop.
+    """
+    from agentharness import repl
+
+    prov = FakeProvider(script)
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: prov)
+    return repl.Harness(Config(skills_dir=str(tmp_path), **cfg)), prov
+
+
+def test_spawn_subagent_returns_answer(tmp_path, monkeypatch, capsys):
+    h, _ = _spawn_harness(tmp_path, monkeypatch, [_text_response("42")])
+    answer = h._spawn_subagent("what is 6*7?", None, None)
+    assert answer == "42"
+    out = capsys.readouterr().out
+    assert "created" in out and "task:" in out and "returning result" in out
+    assert h.states.active.name == "default"  # caller's active state restored
+    assert any(n.startswith("subagent-") for n in h.states.names())  # state persisted
+
+
+def test_spawn_subagent_defaults_to_caller_provider_and_model(tmp_path, monkeypatch):
+    h, _ = _spawn_harness(
+        tmp_path, monkeypatch, [_text_response("ok")],
+        provider="anthropic", model="claude-opus-4-8",
+    )
+    h._spawn_subagent("task", None, None)
+    sub = next(s for s in h.states if s.name.startswith("subagent-"))
+    assert sub.provider_name == "anthropic"
+    assert sub.model == "claude-opus-4-8"
+
+
+def test_spawn_subagent_explicit_provider_and_model(tmp_path, monkeypatch):
+    h, _ = _spawn_harness(tmp_path, monkeypatch, [_text_response("ok")])
+    h._spawn_subagent("task", "gemini", "gemini-3.5-flash")
+    sub = next(s for s in h.states if s.name.startswith("subagent-"))
+    assert sub.provider_name == "gemini"
+    assert sub.model == "gemini-3.5-flash"
+
+
+def test_spawn_subagent_runs_tool_loop_and_logs(tmp_path, monkeypatch, capsys):
+    h, _ = _spawn_harness(
+        tmp_path, monkeypatch,
+        [
+            _tool_response("c1", "greet", {"name": "Ada", "style": "formal"}),
+            _text_response("Greeted Ada."),
+        ],
+    )
+    answer = h._spawn_subagent("greet Ada formally", None, None)
+    assert answer == "Greeted Ada."
+    out = capsys.readouterr().out
+    assert "greet(" in out and "result:" in out  # subagent tool activity is logged
+
+
+def test_subagent_registry_excludes_spawn_tool(tmp_path, monkeypatch):
+    h, _ = _harness(tmp_path, monkeypatch)
+    assert "spawn_subagent" in h.registry            # caller can delegate
+    assert "spawn_subagent" not in h._subagent_registry  # but subagents cannot (no recursion)
+    # subagents still have the ordinary tools/skills tools
+    assert "greet" in h._subagent_registry
+    assert "read_skill" in h._subagent_registry
+    assert "list_models" in h._subagent_registry
+
+
+def test_spawn_subagent_max_iterations_restores_active(tmp_path, monkeypatch):
+    script = [_tool_response("c", "greet", {"name": "X"}) for _ in range(20)]
+    h, _ = _spawn_harness(tmp_path, monkeypatch, script, max_tool_iterations=3)
+    answer = h._spawn_subagent("loop forever", None, None)
+    assert "did not converge" in answer
+    assert h.states.active.name == "default"  # active restored even on failure

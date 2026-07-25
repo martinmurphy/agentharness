@@ -141,8 +141,15 @@ providers:
   `tools/provider_tools.py` for one that exposes harness internals to the
   model), then register it in `tools/registry.build_default_registry`. A tool
   that needs live state (e.g. `list_models`, which queries the active provider —
-  or any named provider, or `all` of them whose keys are set) is registered by
-  the harness instead — see `Harness._build_registry` in `repl.py`.
+  or any named provider, or `all` of them whose keys are set; or
+  `spawn_subagent`, which runs a nested agent) is registered by the harness
+  instead — see `Harness._build_registry` in `repl.py`.
+- **Delegation** — the `spawn_subagent` tool lets the model create a fresh
+  conversation state (defaulting to its own provider/model, or a different one),
+  run a full tool/skill loop on it until it produces an answer, and get that
+  answer back as the tool result. Subagents get the base toolset without
+  `spawn_subagent`, so delegation is one level deep. Their processing is logged
+  to the REPL, and the subagent's state persists (inspect it with `/switch`).
 - **Add a skill** — create `skills/<name>/SKILL.md` with `name` (matching the
   directory) and `description` frontmatter. Optional `references/`, `assets/`,
   `scripts/` files are read as text via `read_skill_file`. Run `/reload`.

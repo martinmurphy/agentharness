@@ -9,6 +9,7 @@ from agentharness.skills.loader import load_skills
 from agentharness.tools.greet import greet_tool
 from agentharness.tools.model_tools import list_models_tool
 from agentharness.tools.registry import ToolRegistry, build_default_registry
+from agentharness.tools.subagent_tools import spawn_subagent_tool
 
 
 def test_greet_styles():
@@ -193,3 +194,29 @@ def test_read_skill_file_traversal_is_error(tmp_path):
                  arguments={"skill": "demo", "path": "../../etc/hostname"})
     )
     assert result.is_error
+
+
+def test_spawn_subagent_tool_calls_runner():
+    seen = {}
+
+    def runner(task, provider, model):
+        seen["args"] = (task, provider, model)
+        return "the answer"
+
+    reg = ToolRegistry()
+    reg.register(spawn_subagent_tool(runner, ["anthropic", "gemini"]))
+    result = reg.dispatch(
+        ToolCall(id="c", name="spawn_subagent",
+                 arguments={"task": "do x", "provider": "gemini"})
+    )
+    assert not result.is_error
+    assert result.content == "the answer"
+    assert seen["args"] == ("do x", "gemini", None)  # model omitted -> None (caller default)
+
+
+def test_spawn_subagent_tool_requires_task():
+    reg = ToolRegistry()
+    reg.register(spawn_subagent_tool(lambda *a: "x", ["anthropic"]))
+    result = reg.dispatch(ToolCall(id="c", name="spawn_subagent", arguments={}))
+    assert result.is_error
+    assert "task" in result.content

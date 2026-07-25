@@ -18,6 +18,14 @@ from agentharness.skills.loader import SkillSet, load_skills
 from agentharness.state import StateManager
 from agentharness.tools.model_tools import list_models_tool
 from agentharness.tools.registry import ToolRegistry, build_default_registry
+from agentharness.tools.subagent_tools import spawn_subagent_tool
+
+SUBAGENT_SYSTEM = (
+    "You are a subagent working on a single task delegated to you by another "
+    "agent. Use the available tools and skills to work out the answer, then give "
+    "your final answer clearly and concisely as your last message. Do not ask "
+    "questions back — you are running autonomously and must reach an answer."
+)
 
 # readline is imported for its side effect: line editing + history on input().
 try:  # pragma: no cover - platform dependent
@@ -65,12 +73,16 @@ class Harness:
             default_model=config.model,
             default_system=config.system_prompt,
         )
+        self._subagent_counter = 0
+        # Subagents get the base toolset (no spawn_subagent) so delegation is
+        # one level deep and cannot recurse. The main registry adds spawn.
+        self._subagent_registry: ToolRegistry = self._build_base_registry()
         self.registry: ToolRegistry = self._build_registry()
 
     def _build_provider(self, provider_name: str, model: str) -> Provider:
         return build_provider(provider_name, model, self.config)
 
-    def _build_registry(self) -> ToolRegistry:
+    def _build_base_registry(self) -> ToolRegistry:
         """Default (state-free) tools plus the state-dependent list_models tool."""
         registry = build_default_registry(self.skillset)
         registry.register(
@@ -79,6 +91,13 @@ class Harness:
                 self._list_models_for,
             )
         )
+        return registry
+
+    def _build_registry(self) -> ToolRegistry:
+        """The main registry: base tools plus the spawn_subagent tool."""
+        registry = self._build_base_registry()
+        providers = [p.name for p in provider_status()]
+        registry.register(spawn_subagent_tool(self._spawn_subagent, providers))
         return registry
 
     def _list_models_for(self, provider_name: str) -> list[str]:
@@ -103,6 +122,77 @@ class Harness:
         catalog = self.skillset.catalog_prompt()
         base = self.states.active.system
         return f"{base}\n\n{catalog}" if catalog else base
+
+    # ---- subagent delegation ------------------------------------------------
+
+    def _log(self, message: str) -> None:
+        """Emit a subagent-processing log line to the REPL surface."""
+        print(self.ansi.dim(message))
+
+    def _spawn_subagent(
+        self, task: str, provider: str | None, model: str | None
+    ) -> str:
+        """Run a task on a fresh subagent state and return its final answer.
+
+        The subagent uses its own state and provider (defaulting to the caller's
+        provider/model), runs the full tool/skill loop, and logs its processing.
+        The caller's active state is restored afterward, so delegation does not
+        disturb the caller's conversation.
+        """
+        caller = self.states.active
+        caller_name = caller.name
+        provider_name = provider or caller.provider_name
+        model_name = model or caller.model
+
+        self._subagent_counter += 1
+        name = f"subagent-{self._subagent_counter}"
+        while name in self.states.names():
+            self._subagent_counter += 1
+            name = f"subagent-{self._subagent_counter}"
+
+        self._log(f"[{name}] created (provider={provider_name} model={model_name})")
+        self._log(f"[{name}] task: {_truncate(task, 200)}")
+
+        # Activating the subagent makes it the 'active' state for the duration of
+        # its run, so tools like list_models resolve against the subagent's
+        # provider. The caller's turn keeps its own state reference, so this does
+        # not corrupt it; we restore the caller's active state in `finally`.
+        sub = self.states.new(
+            name, provider=provider_name, model=model_name, system=SUBAGENT_SYSTEM
+        )
+        try:
+            sub.add(Message(role="user", blocks=[TextBlock(task)]))
+            for event in agent.run_turn(
+                provider=sub.provider,
+                state=sub,
+                registry=self._subagent_registry,
+                system=self.effective_system(),
+                max_tokens=self.config.max_tokens,
+                max_iterations=self.config.max_tool_iterations,
+            ):
+                self._log_subagent_event(name, event)
+            answer = sub.messages[-1].text() if sub.messages else ""
+        except agent.MaxIterationsExceeded as exc:
+            self._log(self.ansi.red(f"[{name}] stopped: {exc}"))
+            return f"Subagent did not converge on an answer: {exc}"
+        except Exception as exc:  # noqa: BLE001 - surface subagent failure to the caller
+            self._log(self.ansi.red(f"[{name}] error: {type(exc).__name__}: {exc}"))
+            return f"Subagent failed: {type(exc).__name__}: {exc}"
+        finally:
+            self.states.switch(caller_name)
+
+        answer = answer or "(the subagent produced no text answer)"
+        self._log(f"[{name}] returning result to {caller_name}: {_truncate(answer, 200)}")
+        return answer
+
+    def _log_subagent_event(self, name: str, event: agent.Event) -> None:
+        if isinstance(event, agent.ToolCallEvent):
+            args = ", ".join(f"{k}={v!r}" for k, v in event.call.arguments.items())
+            self._log(f"[{name}] → {event.call.name}({args})")
+        elif isinstance(event, agent.ToolResultEvent):
+            r = event.result
+            label = "← error" if r.is_error else "← result"
+            self._log(f"[{name}] {label}: {_truncate(r.content, 160)}")
 
     # ---- turn execution -----------------------------------------------------
 
@@ -149,6 +239,7 @@ class Harness:
 
     def reload_skills(self) -> None:
         self.skillset = load_skills(self.config.skills_dir)
+        self._subagent_registry = self._build_base_registry()
         self.registry = self._build_registry()
 
 
