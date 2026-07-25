@@ -51,3 +51,21 @@ allowlist (resolve-then-check, and guard against DNS-rebinding by pinning the
 resolved IP for the actual connection). Surface rejections as a normal tool
 error. Keep the default safe (deny internal) so the capability is opt-in for
 internal targets.
+
+## Pluggable / keyed web_search backends
+
+**Problem.** The `web_search` tool (`src/agentharness/tools/search_tools.py`) has
+a single, keyless DuckDuckGo backend that scrapes DDG's HTML endpoint. That keeps
+search usable with zero setup, but it is unofficial and best-effort: it can break
+when DDG's markup changes and may be rate-limited or blocked on datacenter IPs.
+
+**Why deferred.** Keyless-first was the deliberate choice (zero setup). A robust
+keyed backend (Brave, Tavily) needs an account and key and was out of scope for
+the first pass.
+
+**Sketch of the fix.** Add a keyed backend function alongside `_duckduckgo_search`
+— e.g. `_brave_search(query, count)` reading `BRAVE_API_KEY` from the env (REST
+via `urllib`, no new dependency) — returning the same `SearchResult` list (the
+shared contract). Add a `search_backend` config field (default `"duckduckgo"`) to
+select it, and thread it into `web_search_tool`. Keep DuckDuckGo as the keyless
+default so search still works out of the box.

@@ -68,6 +68,7 @@ def test_default_registry_includes_skill_and_provider_tools(tmp_path):
         "greet",
         "list_providers",
         "web_fetch",
+        "web_search",
         "read_skill",
         "read_skill_file",
     }
@@ -367,3 +368,108 @@ def test_web_fetch_truncates_large_body(monkeypatch):
         ToolCall(id="c", name="web_fetch", arguments={"url": "https://x.test/big"})
     )
     assert "truncated" in result.content
+
+
+# ---- web_search -------------------------------------------------------------
+
+
+_DDG_HTML = """
+<html><body>
+<div class="result">
+  <a rel="nofollow" class="result__a"
+     href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fone&amp;rut=abc">Result One</a>
+  <a class="result__snippet" href="x">Snippet <b>one</b> text</a>
+</div>
+<div class="result">
+  <a rel="nofollow" class="result__a"
+     href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Ftwo">Result Two</a>
+  <a class="result__snippet">Snippet two</a>
+</div>
+<div class="result">
+  <a rel="nofollow" class="result__a"
+     href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.net%2Fthree">Result Three</a>
+  <a class="result__snippet">Snippet three</a>
+</div>
+</body></html>
+"""
+
+
+class _FakeSearchResponse:
+    def __init__(self, html):
+        self._body = html.encode("utf-8")
+
+    def read(self, n):
+        return self._body[:n]
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _patch_search(monkeypatch, html=None, exc=None):
+    from agentharness.tools import search_tools
+
+    def fake_urlopen(request, timeout=None):
+        if exc is not None:
+            raise exc
+        return _FakeSearchResponse(html)
+
+    monkeypatch.setattr(search_tools.urllib.request, "urlopen", fake_urlopen)
+
+
+def _search_reg():
+    from agentharness.tools.search_tools import web_search_tool
+
+    reg = ToolRegistry()
+    reg.register(web_search_tool())
+    return reg
+
+
+def test_web_search_parses_results(monkeypatch):
+    _patch_search(monkeypatch, html=_DDG_HTML)
+    result = _search_reg().dispatch(
+        ToolCall(id="c", name="web_search", arguments={"query": "example"})
+    )
+    assert not result.is_error
+    # uddg redirect decoded to the real URL
+    assert "https://example.com/one" in result.content
+    assert "Result One" in result.content
+    assert "Snippet one text" in result.content  # nested <b> flattened
+    assert "https://example.org/two" in result.content
+
+
+def test_web_search_respects_count(monkeypatch):
+    _patch_search(monkeypatch, html=_DDG_HTML)
+    result = _search_reg().dispatch(
+        ToolCall(id="c", name="web_search", arguments={"query": "example", "count": 2})
+    )
+    assert "1." in result.content and "2." in result.content
+    assert "3." not in result.content  # capped at 2
+
+
+def test_web_search_no_results(monkeypatch):
+    _patch_search(monkeypatch, html="<html><body>nothing here</body></html>")
+    result = _search_reg().dispatch(
+        ToolCall(id="c", name="web_search", arguments={"query": "zxcvzxcv"})
+    )
+    assert not result.is_error  # empty is not an error
+    assert "No results found" in result.content
+
+
+def test_web_search_requires_query():
+    result = _search_reg().dispatch(ToolCall(id="c", name="web_search", arguments={}))
+    assert result.is_error
+    assert "query" in result.content
+
+
+def test_web_search_request_failure_is_error(monkeypatch):
+    import urllib.error
+
+    _patch_search(monkeypatch, exc=urllib.error.URLError("boom"))
+    result = _search_reg().dispatch(
+        ToolCall(id="c", name="web_search", arguments={"query": "example"})
+    )
+    assert result.is_error
+    assert "search request failed" in result.content
