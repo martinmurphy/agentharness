@@ -341,9 +341,26 @@ change to the agent loop:
   `function_response` parts), advertises tools via `parameters_json_schema`, and detects tool-use
   by function-call presence (Gemini reports `finish_reason: STOP` even when calling). Wired into
   `providers/factory.build_provider`.
-- **`/models` command** — each provider grows `list_models()`; the REPL lists the models the
-  active state's provider+key can reach and marks the current one.
+- **`/models` command + `list_models` tool** — each provider grows `list_models()`. The
+  `/models` REPL command lists the active provider's models (marking the current one); the
+  model-callable `list_models` tool can also target a named provider or `all` providers whose
+  keys are set.
 - **Provider listing (`list_providers` tool + `/providers` command)** — a `provider → env var`
   mapping in `factory.py` becomes the single source of truth `_KNOWN` derives from; a shared
   `provider_status()` feeds both a model-callable tool and a REPL command. Detailed design note:
   [`plan-provider-listing.md`](plan-provider-listing.md).
+- **Older-model thinking on Anthropic** — the adapter tries adaptive thinking + effort and, on
+  the 400 that older models (Haiku 4.5, Sonnet 4.5) return, drops them and retries, remembering
+  it per instance. An opt-in `thinking_budget` config makes those models use fixed-budget
+  extended thinking on that fallback path instead of none. (The fallback is currently silent —
+  see `future-work.md`.)
+- **`web_fetch` tool** — model-callable HTTP GET/POST over stdlib `urllib`; `content_type` sets
+  the POST input type, `accept` the desired response type. State-free, so subagents get it too.
+  SSRF caveat and allowlisting are noted in `future-work.md`.
+- **`web_search` tool** — keyless DuckDuckGo search (stdlib `urllib` + `html.parser`) returning
+  title/URL/snippet; pairs with `web_fetch` (search finds, fetch reads). Keyed backends are a
+  future seam (`future-work.md`).
+- **`spawn_subagent` tool** — delegation: the model spawns a fresh state (defaulting to its own
+  provider/model, or a different one), runs a full tool/skill loop until it answers, and gets the
+  answer back. Recursion-safe (subagents get the base toolset without `spawn_subagent`); the
+  caller's active state is restored after the run; processing is logged to the REPL.

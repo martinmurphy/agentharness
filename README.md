@@ -13,9 +13,11 @@ model.
 
 - **REPL** — type a prompt to the active conversation; slash commands manage
   everything else.
-- **Tools** — a trivial `greet` tool proves the loop end to end, plus
-  `read_skill` / `read_skill_file` that implement Agent Skills' progressive
-  disclosure.
+- **Tools** — model-callable functions in a registry: `greet` (a trivial
+  example that proves the loop), `read_skill` / `read_skill_file` (Agent Skills
+  progressive disclosure), `web_search` / `web_fetch` (find and read web pages),
+  `list_providers` / `list_models` (discover configured providers and their
+  models), and `spawn_subagent` (delegate to a nested agent). See *Extending*.
 - **Skills** — discovered at runtime from a directory (bind-mounted from the
   host in the container), validated against the spec, and advertised to the
   model as a catalog it loads on demand.
@@ -60,7 +62,7 @@ python3 -m venv .venv
 .venv/bin/agentharness --list-skills     # no API key needed
 ANTHROPIC_API_KEY=sk-... .venv/bin/agentharness
 
-.venv/bin/pytest -q                      # 60 tests, no network
+.venv/bin/pytest -q                      # 115 tests, no network
 .venv/bin/ruff check .
 ```
 
@@ -176,7 +178,8 @@ src/agentharness/
   agent.py             provider-neutral agent loop (yields events)
   state.py             ConversationState + StateManager (in-memory)
   skills/              Skill model, discovery, validation, catalog
-  tools/               registry, greet, read_skill / read_skill_file
+  tools/               registry + built-in tools (greet, skills, web,
+                       providers, models, subagent)
   providers/           neutral model + Anthropic / Gemini / OpenAI adapters
 skills/                example skills (bind-mounted to /skills at runtime)
 Containerfile          UBI10 + python3.14
@@ -186,4 +189,6 @@ Containerfile          UBI10 + python3.14
 
 In-memory state only (nothing persists across restarts); skill `scripts/` are
 readable as text but never executed; no streaming yet. Each is a clean addition
-against the existing seams — see the design doc in the plan.
+against the existing seams. Design notes live in [`docs/plan.md`](docs/plan.md)
+(the build plan) and [`docs/future-work.md`](docs/future-work.md) (deferred
+items, incl. `web_fetch` SSRF allowlisting and keyed `web_search` backends).
