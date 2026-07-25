@@ -55,6 +55,7 @@ def build_provider(name: str, model: str, config: Config) -> Provider:
             model,
             effort=config.effort,
             show_thinking=config.show_thinking,
+            thinking_budget=config.thinking_budget,
             **options,
         )
     if name == "openai":

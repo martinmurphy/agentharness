@@ -129,7 +129,8 @@ class _AdaptiveRejectingClient:
         import anthropic
 
         self.calls.append(kwargs)
-        if "thinking" in kwargs:
+        # Older models reject *adaptive* thinking but accept enabled/budget_tokens.
+        if kwargs.get("thinking", {}).get("type") == "adaptive":
             resp = self._httpx.Response(400, request=self._httpx.Request("POST", "http://x"))
             raise anthropic.BadRequestError(
                 "adaptive thinking is not supported on this model",
@@ -157,6 +158,42 @@ def test_anthropic_falls_back_when_adaptive_unsupported():
     provider.chat(system="S", messages=[], tools=[], max_tokens=10)
     assert len(client.calls) == 1
     assert "thinking" not in client.calls[0]
+
+
+def test_anthropic_fallback_uses_thinking_budget_when_set():
+    client = _AdaptiveRejectingClient(_anthropic_response([SimpleNamespace(type="text", text="hi")]))
+    provider = AnthropicProvider("claude-haiku-4-5", client=client, thinking_budget=4000)
+
+    provider.chat(system="S", messages=[], tools=[], max_tokens=16000)
+    retry = client.calls[1]  # the non-adaptive retry
+    assert retry["thinking"] == {"type": "enabled", "budget_tokens": 4000}
+    assert "output_config" not in retry  # older models reject effort
+
+
+def test_anthropic_fallback_budget_clamped_below_max_tokens():
+    client = _AdaptiveRejectingClient(_anthropic_response([SimpleNamespace(type="text", text="hi")]))
+    provider = AnthropicProvider("claude-haiku-4-5", client=client, thinking_budget=100000)
+
+    provider.chat(system="S", messages=[], tools=[], max_tokens=8000)
+    assert client.calls[1]["thinking"] == {"type": "enabled", "budget_tokens": 7999}
+
+
+def test_anthropic_fallback_budget_skipped_when_no_room_for_minimum():
+    client = _AdaptiveRejectingClient(_anthropic_response([SimpleNamespace(type="text", text="hi")]))
+    provider = AnthropicProvider("claude-haiku-4-5", client=client, thinking_budget=4000)
+
+    provider.chat(system="S", messages=[], tools=[], max_tokens=1000)  # < 1024 min
+    assert "thinking" not in client.calls[1]
+
+
+def test_anthropic_current_model_ignores_thinking_budget():
+    # A current model accepts adaptive, so the fallback (and its budget) never runs.
+    client = FakeAnthropicClient(_anthropic_response([SimpleNamespace(type="text", text="hi")]))
+    provider = AnthropicProvider("claude-opus-4-8", client=client, thinking_budget=4000)
+    provider.chat(system="S", messages=[], tools=[], max_tokens=16000)
+    req = client.captured
+    assert req["thinking"] == {"type": "adaptive"}
+    assert "budget_tokens" not in req.get("thinking", {})
 
 
 def test_anthropic_other_bad_request_not_swallowed():

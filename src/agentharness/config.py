@@ -33,6 +33,10 @@ class Config:
     model: str = "claude-opus-4-8"
     max_tokens: int = 16000
     effort: str = "high"
+    # Fixed thinking budget (tokens) for Anthropic models that don't support
+    # adaptive thinking (Haiku 4.5, Sonnet 4.5, …). None = no thinking on those
+    # models. Ignored on current models, which always use adaptive thinking.
+    thinking_budget: int | None = None
     show_thinking: bool = False
     max_tool_iterations: int = 10
     skills_dir: str = "./skills"
@@ -62,6 +66,7 @@ _SCALAR_FIELDS: dict[str, Any] = {
     "model": str,
     "max_tokens": int,
     "effort": str,
+    "thinking_budget": int,
     "show_thinking": lambda v: str(v).strip().lower() in ("1", "true", "yes", "on"),
     "max_tool_iterations": int,
     "skills_dir": str,

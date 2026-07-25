@@ -10,6 +10,10 @@ provider: anthropic          # anthropic | openai | gemini
 model: claude-opus-4-8
 max_tokens: 16000
 effort: high                 # low | medium | high | xhigh | max (Anthropic only)
+# thinking_budget: 4000      # Anthropic only: fixed thinking tokens for older
+#                            # models (Haiku 4.5, Sonnet 4.5) that reject adaptive
+#                            # thinking. Unset = no thinking on those. Clamped to
+#                            # 1024 <= N < max_tokens. Ignored on current models.
 show_thinking: false         # render model reasoning (Anthropic summary / Gemini thoughts)
 max_tool_iterations: 10      # cap on tool round-trips within one turn
 skills_dir: ./skills         # inside the container this is /skills (mounted)

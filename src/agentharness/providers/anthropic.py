@@ -47,12 +47,16 @@ class AnthropicProvider:
         *,
         effort: str = "high",
         show_thinking: bool = False,
+        thinking_budget: int | None = None,
         client: Any = None,
         **options: Any,
     ) -> None:
         self.model = model
         self.effort = effort
         self.show_thinking = show_thinking
+        # Fixed thinking budget for models that reject adaptive thinking; used
+        # only on the non-adaptive fallback path. None = no thinking there.
+        self.thinking_budget = thinking_budget
         # Adaptive thinking + effort are supported on current models (Opus 4.6+,
         # Sonnet 4.6+, …) but 400 on older ones (Haiku 4.5, Sonnet 4.5, …). We
         # try them, and on that specific 400 drop them and remember it for this
@@ -169,7 +173,21 @@ class AnthropicProvider:
         if adaptive:
             kwargs["thinking"] = self._thinking()
             kwargs["output_config"] = {"effort": self.effort}
+        else:
+            # Older models: optional fixed-budget extended thinking (no effort —
+            # they reject output_config). Budget must satisfy 1024 <= N < max_tokens.
+            budget = self._enabled_budget(max_tokens)
+            if budget is not None:
+                kwargs["thinking"] = {"type": "enabled", "budget_tokens": budget}
         return self._client.messages.create(**kwargs)
+
+    def _enabled_budget(self, max_tokens: int) -> int | None:
+        """Clamp the configured thinking budget to the API's bounds, or None if
+        unset or if max_tokens leaves no room for the 1024-token minimum."""
+        if not self.thinking_budget:
+            return None
+        budget = min(self.thinking_budget, max_tokens - 1)
+        return budget if budget >= 1024 else None
 
     def chat(
         self,

@@ -24,6 +24,20 @@ def test_yaml_file(monkeypatch, tmp_path):
     assert cfg.max_tokens == 2048
 
 
+def test_thinking_budget_default_and_override(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AGENTHARNESS_CONFIG", raising=False)
+    assert load_config().thinking_budget is None  # off by default
+
+    path = tmp_path / "c.yaml"
+    path.write_text("thinking_budget: 4000\n", encoding="utf-8")
+    monkeypatch.setenv("AGENTHARNESS_CONFIG", str(path))
+    assert load_config().thinking_budget == 4000
+
+    monkeypatch.setenv("AGENTHARNESS_THINKING_BUDGET", "2048")
+    assert load_config().thinking_budget == 2048  # env overrides file
+
+
 def test_env_override_beats_file(monkeypatch, tmp_path):
     path = tmp_path / "c.yaml"
     path.write_text("model: gpt-4o\n", encoding="utf-8")
