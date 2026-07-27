@@ -572,3 +572,48 @@ def test_write_tools_unavailable_on_read_only_workspace(tmp_path):
     )
     assert result.is_error
     assert "unknown tool" in result.content
+
+
+# ---- provider aliases through the tools ------------------------------------
+
+
+def _alias_cfg():
+    from agentharness.config import Config
+
+    return Config(
+        providers={
+            "lmstudio": {"type": "openai", "base_url": "http://localhost:1234/v1"},
+            "together": {"type": "openai", "api_key_env": "TOGETHER_API_KEY"},
+        }
+    )
+
+
+def test_list_providers_tool_reports_aliases(tmp_path, monkeypatch):
+    monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
+    reg = build_default_registry(load_skills(tmp_path), _ws(tmp_path), _alias_cfg())
+    result = reg.dispatch(ToolCall(id="c", name="list_providers", arguments={}))
+    assert not result.is_error
+    assert "lmstudio (local endpoint, no key needed): ready" in result.content
+    assert "together (key from TOGETHER_API_KEY): no key" in result.content
+    assert "anthropic (key from ANTHROPIC_API_KEY)" in result.content  # built-ins remain
+
+
+def test_list_providers_tool_without_config_is_builtins_only(tmp_path):
+    reg = build_default_registry(load_skills(tmp_path), _ws(tmp_path))
+    result = reg.dispatch(ToolCall(id="c", name="list_providers", arguments={}))
+    assert "lmstudio" not in result.content
+
+
+def test_list_models_accepts_an_alias_name():
+    reg = ToolRegistry()
+    reg.register(
+        list_models_tool(lambda: "lmstudio", lambda name: ["qwen3.5-9b-mlx"], _alias_cfg())
+    )
+    result = reg.dispatch(
+        ToolCall(id="c", name="list_models", arguments={"provider": "lmstudio"})
+    )
+    assert not result.is_error
+    assert "qwen3.5-9b-mlx" in result.content
+    # and the enum offered to the model lists it
+    spec = reg.get("list_models").input_schema
+    assert "lmstudio" in spec["properties"]["provider"]["enum"]

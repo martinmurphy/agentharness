@@ -505,3 +505,43 @@ def test_effective_system_omits_missing_workspace(tmp_path, monkeypatch):
     h, _ = _harness(tmp_path, monkeypatch)
     h.workspace.root.rmdir()
     assert "workspace directory is available" not in h.effective_system()
+
+
+# ---- provider aliases -------------------------------------------------------
+
+
+def _alias_harness(tmp_path, monkeypatch):
+    from agentharness import repl
+
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: FakeProvider([]))
+    cfg = Config(
+        skills_dir=str(tmp_path),
+        workspace_dir=str(_ws(tmp_path).root),
+        providers={
+            "lmstudio": {"type": "openai", "base_url": "http://localhost:1234/v1"},
+            "together": {"type": "openai", "api_key_env": "TOGETHER_API_KEY"},
+        },
+    )
+    return repl.Harness(cfg), repl
+
+
+def test_repl_providers_lists_aliases(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
+    h, repl = _alias_harness(tmp_path, monkeypatch)
+    repl._handle_command(h, "/providers")
+    out = capsys.readouterr().out
+    assert "lmstudio" in out and "no key needed" in out
+    assert "together" in out and "TOGETHER_API_KEY" in out
+
+
+def test_spawn_subagent_enum_includes_aliases(tmp_path, monkeypatch):
+    h, _ = _alias_harness(tmp_path, monkeypatch)
+    enum = h.registry.get("spawn_subagent").input_schema["properties"]["provider"]["enum"]
+    assert "lmstudio" in enum and "anthropic" in enum
+
+
+def test_state_can_target_an_alias(tmp_path, monkeypatch):
+    h, repl = _alias_harness(tmp_path, monkeypatch)
+    assert repl._handle_command(h, "/new local --provider lmstudio --model qwen3.5-9b-mlx")
+    assert h.states.active.provider_name == "lmstudio"
+    assert h.states.active.model == "qwen3.5-9b-mlx"

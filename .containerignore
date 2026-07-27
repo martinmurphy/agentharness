@@ -10,4 +10,5 @@ dist/
 tests/
 skills/
 workspace/
+config/
 config.yaml

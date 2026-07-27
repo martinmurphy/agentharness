@@ -628,3 +628,188 @@ def test_provider_status_reflects_env(monkeypatch):
     assert status["anthropic"].env_var == "ANTHROPIC_API_KEY"
     assert status["openai"].available is False
     assert status["gemini"].available is True
+
+
+# ---- provider aliases --------------------------------------------------------
+
+
+def _alias_config(**blocks):
+    from agentharness.config import Config
+
+    return Config(providers=blocks)
+
+
+def _fake_openai(monkeypatch):
+    """Capture the kwargs the OpenAI SDK client would be constructed with."""
+    import openai
+
+    captured = {}
+
+    class _Client:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(openai, "OpenAI", _Client)
+    return captured
+
+
+def test_alias_builds_its_declared_adapter(monkeypatch):
+    from agentharness.providers.factory import build_provider
+    from agentharness.providers.openai_compatible import OpenAICompatibleProvider
+
+    captured = _fake_openai(monkeypatch)
+    cfg = _alias_config(
+        lmstudio={"type": "openai", "base_url": "http://localhost:1234/v1"}
+    )
+    provider = build_provider("lmstudio", "some-model", cfg)
+
+    assert isinstance(provider, OpenAICompatibleProvider)
+    assert provider.model == "some-model"
+    assert captured["base_url"] == "http://localhost:1234/v1"
+    # 'type' is a harness key and must not reach the SDK
+    assert "type" not in captured
+
+
+def test_two_aliases_keep_separate_base_urls(monkeypatch):
+    from agentharness.providers.factory import build_provider
+
+    cfg = _alias_config(
+        one={"type": "openai", "base_url": "http://a:1/v1"},
+        two={"type": "openai", "base_url": "http://b:2/v1"},
+    )
+    captured = _fake_openai(monkeypatch)
+    build_provider("one", "m", cfg)
+    assert captured["base_url"] == "http://a:1/v1"
+    captured = _fake_openai(monkeypatch)
+    build_provider("two", "m", cfg)
+    assert captured["base_url"] == "http://b:2/v1"
+
+
+def test_alias_api_key_env_is_read_from_environment(monkeypatch):
+    from agentharness.providers.factory import build_provider
+
+    monkeypatch.setenv("TOGETHER_API_KEY", "secret-value")
+    captured = _fake_openai(monkeypatch)
+    cfg = _alias_config(
+        together={
+            "type": "openai",
+            "base_url": "https://api.together.xyz/v1",
+            "api_key_env": "TOGETHER_API_KEY",
+        }
+    )
+    build_provider("together", "m", cfg)
+
+    assert captured["api_key"] == "secret-value"
+    # the env var *name* is a harness key, not an SDK one
+    assert "api_key_env" not in captured
+
+
+def test_alias_missing_api_key_env_errors_clearly(monkeypatch):
+    from agentharness.providers.factory import build_provider
+
+    monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
+    cfg = _alias_config(
+        together={"type": "openai", "api_key_env": "TOGETHER_API_KEY"}
+    )
+    with pytest.raises(ValueError, match="TOGETHER_API_KEY, which is not set"):
+        build_provider("together", "m", cfg)
+
+
+def test_keyless_local_endpoint_gets_placeholder(monkeypatch):
+    """A base_url with no resolvable key: the OpenAI SDK still needs something."""
+    from agentharness.providers.factory import _PLACEHOLDER_KEY, build_provider
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    captured = _fake_openai(monkeypatch)
+    cfg = _alias_config(lmstudio={"type": "openai", "base_url": "http://localhost:1234/v1"})
+    build_provider("lmstudio", "m", cfg)
+    assert captured["api_key"] == _PLACEHOLDER_KEY
+
+
+def test_builtin_openai_with_base_url_also_gets_placeholder(monkeypatch):
+    from agentharness.providers.factory import _PLACEHOLDER_KEY, build_provider
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    captured = _fake_openai(monkeypatch)
+    cfg = _alias_config(openai={"base_url": "http://localhost:1234/v1"})
+    build_provider("openai", "m", cfg)
+    assert captured["api_key"] == _PLACEHOLDER_KEY
+
+
+def test_builtin_key_in_env_is_not_overridden_by_placeholder(monkeypatch):
+    """A proxy base_url must not clobber the key the SDK would find itself."""
+    from agentharness.providers.factory import build_provider
+
+    monkeypatch.setenv("OPENAI_API_KEY", "real-key")
+    captured = _fake_openai(monkeypatch)
+    cfg = _alias_config(openai={"base_url": "https://proxy.example/v1"})
+    build_provider("openai", "m", cfg)
+    assert "api_key" not in captured  # left to the SDK
+
+
+def test_literal_api_key_still_wins(monkeypatch):
+    from agentharness.providers.factory import build_provider
+
+    monkeypatch.setenv("SOME_KEY", "from-env")
+    captured = _fake_openai(monkeypatch)
+    cfg = _alias_config(
+        local={
+            "type": "openai",
+            "base_url": "http://localhost:1/v1",
+            "api_key": "literal",
+            "api_key_env": "SOME_KEY",
+        }
+    )
+    build_provider("local", "m", cfg)
+    assert captured["api_key"] == "literal"
+
+
+def test_unknown_provider_names_aliases_in_its_error():
+    from agentharness.providers.factory import build_provider
+
+    cfg = _alias_config(lmstudio={"type": "openai", "base_url": "http://x/v1"})
+    with pytest.raises(ValueError, match="unknown provider 'bogus'") as exc:
+        build_provider("bogus", "m", cfg)
+    assert "lmstudio" in str(exc.value)  # the alias is offered as a choice
+
+
+def test_alias_without_type_is_rejected():
+    from agentharness.providers.factory import build_provider
+
+    cfg = _alias_config(mystery={"base_url": "http://x/v1"})
+    with pytest.raises(ValueError, match=r"providers\.mystery\.type"):
+        build_provider("mystery", "m", cfg)
+
+
+def test_alias_with_unknown_type_is_rejected():
+    from agentharness.providers.factory import build_provider
+
+    cfg = _alias_config(weird={"type": "llamafile", "base_url": "http://x/v1"})
+    with pytest.raises(ValueError, match="unknown type 'llamafile'"):
+        build_provider("weird", "m", cfg)
+
+
+def test_provider_status_includes_aliases(monkeypatch):
+    from agentharness.providers.factory import known_providers, provider_status
+
+    monkeypatch.delenv("TOGETHER_API_KEY", raising=False)
+    cfg = _alias_config(
+        lmstudio={"type": "openai", "base_url": "http://x/v1"},
+        together={"type": "openai", "api_key_env": "TOGETHER_API_KEY"},
+    )
+    status = {p.name: p for p in provider_status(cfg)}
+
+    assert status["lmstudio"].keyless is True
+    assert status["lmstudio"].available is True  # needs no key, so it is ready
+    assert status["together"].keyless is False
+    assert status["together"].available is False  # env var unset
+    monkeypatch.setenv("TOGETHER_API_KEY", "x")
+    assert {p.name: p for p in provider_status(cfg)}["together"].available is True
+
+    assert known_providers(cfg) == ["anthropic", "openai", "gemini", "lmstudio", "together"]
+
+
+def test_provider_status_without_config_is_builtins_only():
+    from agentharness.providers.factory import provider_status
+
+    assert [p.name for p in provider_status()] == ["anthropic", "openai", "gemini"]

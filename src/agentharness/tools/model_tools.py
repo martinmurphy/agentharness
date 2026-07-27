@@ -14,9 +14,13 @@ calls, so the harness builds it with closures rather than the state-free
 from __future__ import annotations
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 from agentharness.providers.factory import provider_status
 from agentharness.tools.registry import Tool
+
+if TYPE_CHECKING:
+    from agentharness.config import Config
 
 
 def _format_one(name: str, models: list[str]) -> str:
@@ -28,14 +32,16 @@ def _format_one(name: str, models: list[str]) -> str:
 def list_models_tool(
     active_provider_name: Callable[[], str],
     list_for: Callable[[str], list[str]],
+    config: Config | None = None,
 ) -> Tool:
     """Build the ``list_models`` tool.
 
     ``active_provider_name()`` gives the current conversation's provider;
     ``list_for(name)`` returns that provider's model IDs (and may raise on a
-    missing key, unknown provider, or network/auth error).
+    missing key, unknown provider, or network/auth error). ``config`` is what
+    makes configured provider aliases visible alongside the built-ins.
     """
-    known = [p.name for p in provider_status()]
+    known = [p.name for p in provider_status(config)]
 
     def _handler(args: dict) -> str:
         provider = args.get("provider")
@@ -46,7 +52,7 @@ def list_models_tool(
 
         if provider == "all":
             blocks: list[str] = []
-            for p in provider_status():
+            for p in provider_status(config):
                 if not p.available:
                     blocks.append(f"{p.name}: (no key set — set {p.env_var} to list)")
                     continue

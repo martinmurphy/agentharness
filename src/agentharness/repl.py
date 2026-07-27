@@ -14,7 +14,7 @@ from pathlib import Path
 from agentharness import agent
 from agentharness.config import Config, load_config
 from agentharness.providers.base import Message, Provider, TextBlock
-from agentharness.providers.factory import build_provider, provider_status
+from agentharness.providers.factory import build_provider, known_providers, provider_status
 from agentharness.skills.loader import SkillSet, load_skills
 from agentharness.state import StateManager
 from agentharness.tools.model_tools import list_models_tool
@@ -94,11 +94,12 @@ class Harness:
 
     def _build_base_registry(self) -> ToolRegistry:
         """Default (state-free) tools plus the state-dependent list_models tool."""
-        registry = build_default_registry(self.skillset, self.workspace)
+        registry = build_default_registry(self.skillset, self.workspace, self.config)
         registry.register(
             list_models_tool(
                 lambda: self.states.active.provider_name,
                 self._list_models_for,
+                self.config,
             )
         )
         return registry
@@ -106,7 +107,7 @@ class Harness:
     def _build_registry(self) -> ToolRegistry:
         """The main registry: base tools plus the spawn_subagent tool."""
         registry = self._build_base_registry()
-        providers = [p.name for p in provider_status()]
+        providers = known_providers(self.config)
         registry.register(spawn_subagent_tool(self._spawn_subagent, providers))
         return registry
 
@@ -299,8 +300,12 @@ def _list_providers(h: Harness) -> None:
     """
     a = h.ansi
     active = h.states.active.provider_name
-    for p in provider_status():
-        avail = a.green("key set") if p.available else a.red("no key")
+    for p in provider_status(h.config):
+        avail = (
+            a.green("no key needed")
+            if p.keyless
+            else (a.green("key set") if p.available else a.red("no key"))
+        )
         mark = a.green(" *") if p.name == active else "  "
         suffix = "  (active)" if p.name == active else ""
         print(f"{mark} {p.name:10} {p.env_var:20} {avail}{suffix}")

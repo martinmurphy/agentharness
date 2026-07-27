@@ -75,7 +75,7 @@ python3 -m venv .venv
 .venv/bin/agentharness --list-skills     # no API key needed
 ANTHROPIC_API_KEY=sk-... .venv/bin/agentharness
 
-.venv/bin/pytest -q                      # 165 tests, no network
+.venv/bin/pytest -q                      # 184 tests, no network
 .venv/bin/ruff check .
 ```
 
@@ -113,10 +113,14 @@ Each state can target a different backend:
 ## Configuration
 
 Config is resolved from `$AGENTHARNESS_CONFIG` → `/config/config.yaml` →
-`./config.yaml`. Any key may be overridden by an `AGENTHARNESS_<KEY>`
-environment variable. See [`config.example.yaml`](config.example.yaml). API keys
-are **not** config keys — they come from `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`,
-or `GEMINI_API_KEY`.
+`./config.yaml`. Any *scalar* key may be overridden by an `AGENTHARNESS_<KEY>`
+environment variable; the `providers:` block is file-only, so per-provider
+settings like `base_url` have no env equivalent. See
+[`config.example.yaml`](config.example.yaml). API keys are **not** config keys —
+they come from `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `GEMINI_API_KEY`.
+
+In the container the file comes from the `./config` bind mount (`make run`
+mounts it read-only; an empty directory just means the defaults apply).
 
 Gemini uses the **AI Studio (Developer API)** path — get a key at
 <https://aistudio.google.com/apikey>, export it as `GEMINI_API_KEY`, and:
@@ -141,15 +145,49 @@ Pass it to the container the same way as the others:
 podman run --rm -it -e GEMINI_API_KEY -v "$PWD/skills:/skills:ro,Z" agentharness
 ```
 
-To use a local OpenAI-compatible server:
+### Provider aliases
+
+The three built-in names (`anthropic`, `openai`, `gemini`) are one adapter each,
+with one `base_url` apiece. To reach a *second* endpoint of the same protocol,
+add an alias — any other key under `providers:` with a `type` naming the adapter:
 
 ```yaml
-provider: openai
-model: llama3.1
+provider: lmstudio
+model: qwen3.5-9b-mlx
+
 providers:
-  openai:
-    base_url: http://localhost:11434/v1   # Ollama, for example
+  lmstudio:                                        # a local server: no key at all
+    type: openai
+    base_url: http://host.containers.internal:1234/v1
+  together:                                        # a hosted one: key from the env
+    type: openai
+    base_url: https://api.together.xyz/v1
+    api_key_env: TOGETHER_API_KEY
 ```
+
+Aliases are ordinary provider names everywhere: `/new local --provider lmstudio
+--model qwen3.5-9b-mlx`, `/providers`, `/models`, and `spawn_subagent`'s
+provider list all pick them up.
+
+**Keys still never live in the config.** A built-in's SDK reads its own env var;
+an alias names the variable with `api_key_env` and the harness resolves it at
+construction. If that variable is unset you get a clear error naming it, not a
+401 from the SDK.
+
+Two remaining details:
+
+- **`base_url` ends at `/v1`** — the SDK appends `/models` and
+  `/chat/completions` itself.
+- **The hostname differs by where you run.** `host.containers.internal` reaches
+  the host from inside a podman container; on the host it doesn't resolve — use
+  `localhost` there.
+
+A `base_url` with no key resolvable either way is treated as a keyless local
+server and gets a placeholder, because the OpenAI SDK refuses to construct a
+client with no key at all — so a local endpoint needs no key line. An env var
+that *is* set is never overridden by that placeholder, so pointing a built-in at
+a proxy still uses your real key. `/providers` shows keyless endpoints as
+`no key needed` rather than `no key`.
 
 ## Extending
 
@@ -187,10 +225,12 @@ providers:
 - **Add a skill** — create `skills/<name>/SKILL.md` with `name` (matching the
   directory) and `description` frontmatter. Optional `references/`, `assets/`,
   `scripts/` files are read as text via `read_skill_file`. Run `/reload`.
-- **Add a provider** — implement the `Provider` protocol in
-  `providers/base.py` (map to and from the neutral `Message` model), then wire
-  it into `providers/factory.build_provider`. Nothing in the agent loop
-  changes.
+- **Add a provider** — for another endpoint speaking a protocol the harness
+  already has, no code: add an alias under `providers:` with a `type` (see
+  *Provider aliases*). For a genuinely new protocol, implement the `Provider`
+  protocol in `providers/base.py` (map to and from the neutral `Message` model),
+  then add it to `_ADAPTERS` and the dispatch in `providers/factory.py`. Nothing
+  in the agent loop changes.
 
 ## Layout
 

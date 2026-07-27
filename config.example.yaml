@@ -24,11 +24,30 @@ workspace_writable: true     # false registers only list_dir/read_file — the w
 # system_prompt: |
 #   You are a helpful assistant running inside agentharness.
 
-# Per-provider settings. base_url lets the openai provider target any
-# OpenAI-compatible server (OpenAI, Ollama, vLLM, ...). Gemini here is the AI
-# Studio (Developer API) path — key from GEMINI_API_KEY, no options needed.
+# Per-provider settings, and the registry of providers you can select with
+# `provider:` above or `/new --provider`.
+#
+# The three built-in names (anthropic, openai, gemini) need no `type`. Any other
+# key here is an ALIAS: give it a `type` naming the adapter to use. Aliases are
+# how you reach a second endpoint of the same protocol — the built-in `openai`
+# name has exactly one base_url.
+#
+# Keys still never live in this file. A built-in's SDK reads its own env var; an
+# alias names the variable to read with `api_key_env`. An endpoint with a
+# base_url and no key either way is treated as a keyless local server.
 providers:
   anthropic: {}
   openai:
     base_url: https://api.openai.com/v1
   gemini: {}
+
+  # A local server (LM Studio, Ollama, vLLM ...) — no key needed.
+  # lmstudio:
+  #   type: openai
+  #   base_url: http://host.containers.internal:1234/v1
+
+  # A hosted OpenAI-compatible service — key read from the named env var.
+  # together:
+  #   type: openai
+  #   base_url: https://api.together.xyz/v1
+  #   api_key_env: TOGETHER_API_KEY

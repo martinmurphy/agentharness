@@ -360,6 +360,15 @@ change to the agent loop:
 - **`web_search` tool** — keyless DuckDuckGo search (stdlib `urllib` + `html.parser`) returning
   title/URL/snippet; pairs with `web_fetch` (search finds, fetch reads). Keyed backends are a
   future seam (`future-work.md`).
+- **Provider aliases (`type` + `api_key_env`)** — `providers:` becomes the registry rather
+  than three hardcoded names: any other key is an alias declaring a `type` (an existing
+  adapter) plus its own `base_url`, which is what makes a *second* endpoint of the same
+  protocol reachable. Keys stay out of config — an alias names its env var with
+  `api_key_env` and `factory` resolves it; an endpoint with a `base_url` and no key either
+  way gets a placeholder, since the OpenAI SDK will not construct without one. A key the
+  SDK would find itself is never overridden. `provider_status(config)` reports aliases
+  alongside the built-ins, so `/providers`, `list_providers`, `list_models`, and
+  `spawn_subagent`'s enum all see them.
 - **Workspace filesystem tools** — a second bind-mounted directory (`/workspace`, config
   `workspace_dir`) and four tools over it: `list_dir`, `read_file`, `write_file`, `make_dir`.
   A new `workspace.py` owns confinement (the same resolve + `is_relative_to` check as
