@@ -18,15 +18,18 @@ COPY src ./src
 RUN python3.14 -m pip install --no-cache-dir .
 
 # Rootless / OpenShift-friendly: run as a non-root user in group 0 with
-# group-writable app/skills/config directories.
-RUN mkdir -p /skills /config \
-    && chgrp -R 0 /app /skills /config \
-    && chmod -R g=u /app /skills /config
+# group-writable app/skills/workspace/config directories.
+RUN mkdir -p /skills /workspace /config \
+    && chgrp -R 0 /app /skills /workspace /config \
+    && chmod -R g=u /app /skills /workspace /config
 
 USER 1001
 
-# Skills are bind-mounted here at runtime (see README).
+# Skills (read-only) and the workspace (read-write) are bind-mounted here at
+# runtime — see README for the podman flags, including the userns mapping the
+# writable mount needs under rootless podman.
 ENV AGENTHARNESS_SKILLS_DIR=/skills \
+    AGENTHARNESS_WORKSPACE_DIR=/workspace \
     AGENTHARNESS_CONFIG=/config/config.yaml
 
 ENTRYPOINT ["python3.14", "-m", "agentharness"]

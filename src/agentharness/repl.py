@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import shlex
 import sys
+from pathlib import Path
 
 from agentharness import agent
 from agentharness.config import Config, load_config
@@ -19,12 +20,17 @@ from agentharness.state import StateManager
 from agentharness.tools.model_tools import list_models_tool
 from agentharness.tools.registry import ToolRegistry, build_default_registry
 from agentharness.tools.subagent_tools import spawn_subagent_tool
+from agentharness.workspace import Workspace, list_dir
 
 SUBAGENT_SYSTEM = (
     "You are a subagent working on a single task delegated to you by another "
-    "agent. Use the available tools and skills to work out the answer, then give "
-    "your final answer clearly and concisely as your last message. Do not ask "
-    "questions back — you are running autonomously and must reach an answer."
+    "agent. Do only what that task asks. Call a tool or load a skill only when "
+    "the task cannot be answered without it, and stop calling tools the moment "
+    "you can answer — the workspace, the skills, and the other tools are "
+    "described to you because they are available, not because this task needs "
+    "them, so do not explore them. Then give your final answer clearly and "
+    "concisely as your last message. Do not ask questions back — you are running "
+    "autonomously and must reach an answer."
 )
 
 # readline is imported for its side effect: line editing + history on input().
@@ -66,6 +72,10 @@ class Harness:
     def __init__(self, config: Config) -> None:
         self.config = config
         self.skillset: SkillSet = load_skills(config.skills_dir)
+        self.workspace = Workspace(
+            root=Path(config.workspace_dir).expanduser(),
+            writable=config.workspace_writable,
+        )
         self.ansi = _Ansi(sys.stdout.isatty())
         self.states = StateManager(
             self._build_provider,
@@ -84,7 +94,7 @@ class Harness:
 
     def _build_base_registry(self) -> ToolRegistry:
         """Default (state-free) tools plus the state-dependent list_models tool."""
-        registry = build_default_registry(self.skillset)
+        registry = build_default_registry(self.skillset, self.workspace)
         registry.register(
             list_models_tool(
                 lambda: self.states.active.provider_name,
@@ -119,9 +129,22 @@ class Harness:
         return lister()
 
     def effective_system(self) -> str:
-        catalog = self.skillset.catalog_prompt()
         base = self.states.active.system
-        return f"{base}\n\n{catalog}" if catalog else base
+        parts = [base]
+        catalog = self.skillset.catalog_prompt()
+        if catalog:
+            parts.append(catalog)
+        if self.workspace.root.is_dir():
+            verbs = (
+                "list_dir, read_file, write_file, and make_dir"
+                if self.workspace.writable
+                else "list_dir and read_file (it is read-only)"
+            )
+            parts.append(
+                f"A workspace directory is available at {self.workspace.root}. "
+                f"Use {verbs}; paths are relative to its root."
+            )
+        return "\n\n".join(parts)
 
     # ---- subagent delegation ------------------------------------------------
 
@@ -254,6 +277,7 @@ Commands:
   /skills                                  list loaded skills (and load failures)
   /skill <name>                            print a skill's SKILL.md body
   /tools                                   list registered tools
+  /workspace                               show the workspace directory and its contents
   /providers                               list supported providers and whether keys are set
   /models                                  list models the active provider can reach
   /reload                                  re-scan the skills directory
@@ -280,6 +304,20 @@ def _list_providers(h: Harness) -> None:
         mark = a.green(" *") if p.name == active else "  "
         suffix = "  (active)" if p.name == active else ""
         print(f"{mark} {p.name:10} {p.env_var:20} {avail}{suffix}")
+
+
+def _show_workspace(h: Harness) -> None:
+    """Print the workspace root, its mode, and a top-level listing."""
+    a = h.ansi
+    ws = h.workspace
+    mode = a.green("read-write") if ws.writable else a.red("read-only")
+    print(f"  {a.bold(str(ws.root))}  {mode}")
+    if not ws.root.is_dir():
+        print(a.red("  (directory does not exist)"))
+        return
+    listing = list_dir(ws)
+    for line in listing.splitlines():
+        print(f"  {line}")
 
 
 def _list_models(h: Harness) -> None:
@@ -379,6 +417,8 @@ def _handle_command(h: Harness, line: str) -> bool:
     elif cmd == "/tools":
         for spec in h.registry.specs():
             print(f"  {a.bold(spec.name)}: {_truncate(spec.description, 120)}")
+    elif cmd == "/workspace":
+        _show_workspace(h)
     elif cmd == "/providers":
         _list_providers(h)
     elif cmd == "/models":

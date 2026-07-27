@@ -16,6 +16,13 @@ from agentharness.providers.base import (
 from agentharness.skills.loader import load_skills
 from agentharness.state import StateManager
 from agentharness.tools.registry import build_default_registry
+from agentharness.workspace import Workspace
+
+
+def _ws(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir(exist_ok=True)
+    return Workspace(root=root, writable=True)
 
 
 class FakeProvider:
@@ -77,7 +84,7 @@ def _drive(provider, state, registry, max_iterations=10):
 def test_plain_text_turn(tmp_path):
     provider = FakeProvider([_text_response("hello there")])
     mgr = _manager(provider)
-    registry = build_default_registry(load_skills(tmp_path))
+    registry = build_default_registry(load_skills(tmp_path), _ws(tmp_path))
     state = mgr.active
     state.add(Message(role="user", blocks=[TextBlock("hi")]))
 
@@ -97,7 +104,7 @@ def test_tool_call_cycle(tmp_path):
         ]
     )
     mgr = _manager(provider)
-    registry = build_default_registry(load_skills(tmp_path))
+    registry = build_default_registry(load_skills(tmp_path), _ws(tmp_path))
     state = mgr.active
     state.add(Message(role="user", blocks=[TextBlock("greet Ada")]))
 
@@ -120,7 +127,7 @@ def test_max_iterations_guard(tmp_path):
     # Model keeps calling a tool forever; loop must abort.
     provider = FakeProvider([_tool_response("c", "greet", {"name": "X"}) for _ in range(10)])
     mgr = _manager(provider)
-    registry = build_default_registry(load_skills(tmp_path))
+    registry = build_default_registry(load_skills(tmp_path), _ws(tmp_path))
     state = mgr.active
     state.add(Message(role="user", blocks=[TextBlock("go")]))
 
@@ -192,7 +199,7 @@ def _harness(tmp_path, monkeypatch):
 
     provider = FakeProvider([])
     monkeypatch.setattr(repl, "build_provider", lambda name, model, config: provider)
-    cfg = Config(skills_dir=str(tmp_path))
+    cfg = Config(skills_dir=str(tmp_path), workspace_dir=str(_ws(tmp_path).root))
     return repl.Harness(cfg), repl
 
 
@@ -372,7 +379,8 @@ def _spawn_harness(tmp_path, monkeypatch, script, **cfg):
 
     prov = FakeProvider(script)
     monkeypatch.setattr(repl, "build_provider", lambda name, model, config: prov)
-    return repl.Harness(Config(skills_dir=str(tmp_path), **cfg)), prov
+    base = {"skills_dir": str(tmp_path), "workspace_dir": str(_ws(tmp_path).root)}
+    return repl.Harness(Config(**base, **cfg)), prov
 
 
 def test_spawn_subagent_returns_answer(tmp_path, monkeypatch, capsys):
@@ -434,3 +442,66 @@ def test_spawn_subagent_max_iterations_restores_active(tmp_path, monkeypatch):
     answer = h._spawn_subagent("loop forever", None, None)
     assert "did not converge" in answer
     assert h.states.active.name == "default"  # active restored even on failure
+
+
+# ---- workspace ------------------------------------------------------------
+
+
+def test_repl_workspace_command(tmp_path, monkeypatch, capsys):
+    h, repl = _harness(tmp_path, monkeypatch)
+    (h.workspace.root / "notes.md").write_text("hello", encoding="utf-8")
+    (h.workspace.root / "reports").mkdir()
+    repl._handle_command(h, "/workspace")
+    out = capsys.readouterr().out
+    assert str(h.workspace.root) in out
+    assert "read-write" in out
+    assert "notes.md" in out
+    assert "reports/" in out
+
+
+def test_repl_workspace_command_reports_missing_root(tmp_path, monkeypatch, capsys):
+    h, repl = _harness(tmp_path, monkeypatch)
+    h.workspace.root.rmdir()
+    repl._handle_command(h, "/workspace")
+    assert "does not exist" in capsys.readouterr().out
+
+
+def test_repl_help_lists_workspace(tmp_path, monkeypatch, capsys):
+    h, repl = _harness(tmp_path, monkeypatch)
+    repl._handle_command(h, "/help")
+    assert "/workspace" in capsys.readouterr().out
+
+
+def test_harness_registers_fs_tools(tmp_path, monkeypatch):
+    h, _ = _harness(tmp_path, monkeypatch)
+    for name in ("list_dir", "read_file", "write_file", "make_dir"):
+        assert name in h.registry
+        assert name in h._subagent_registry  # subagents share the workspace
+
+
+def test_read_only_workspace_hides_write_tools_in_harness(tmp_path, monkeypatch):
+    from agentharness import repl
+
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: FakeProvider([]))
+    cfg = Config(
+        skills_dir=str(tmp_path),
+        workspace_dir=str(_ws(tmp_path).root),
+        workspace_writable=False,
+    )
+    h = repl.Harness(cfg)
+    assert "read_file" in h.registry
+    assert "write_file" not in h.registry
+    assert "make_dir" not in h.registry
+
+
+def test_effective_system_mentions_the_workspace(tmp_path, monkeypatch):
+    h, _ = _harness(tmp_path, monkeypatch)
+    system = h.effective_system()
+    assert str(h.workspace.root) in system
+    assert "write_file" in system
+
+
+def test_effective_system_omits_missing_workspace(tmp_path, monkeypatch):
+    h, _ = _harness(tmp_path, monkeypatch)
+    h.workspace.root.rmdir()
+    assert "workspace directory is available" not in h.effective_system()

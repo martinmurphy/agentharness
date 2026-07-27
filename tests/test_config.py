@@ -59,3 +59,30 @@ def test_provider_options(monkeypatch, tmp_path):
     cfg = load_config()
     assert cfg.provider_options("openai") == {"base_url": "http://localhost:11434/v1"}
     assert cfg.provider_options("missing") == {}
+
+
+def test_workspace_defaults(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AGENTHARNESS_CONFIG", raising=False)
+    monkeypatch.delenv("AGENTHARNESS_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("AGENTHARNESS_WORKSPACE_WRITABLE", raising=False)
+    cfg = load_config()
+    assert cfg.workspace_dir == "./workspace"
+    assert cfg.workspace_writable is True  # writes are on by default
+
+
+def test_workspace_from_yaml_and_env(monkeypatch, tmp_path):
+    path = tmp_path / "c.yaml"
+    path.write_text("workspace_dir: /data\nworkspace_writable: false\n", encoding="utf-8")
+    monkeypatch.setenv("AGENTHARNESS_CONFIG", str(path))
+    monkeypatch.delenv("AGENTHARNESS_WORKSPACE_DIR", raising=False)
+    monkeypatch.delenv("AGENTHARNESS_WORKSPACE_WRITABLE", raising=False)
+    cfg = load_config()
+    assert cfg.workspace_dir == "/data"
+    assert cfg.workspace_writable is False
+
+    monkeypatch.setenv("AGENTHARNESS_WORKSPACE_DIR", "/elsewhere")
+    monkeypatch.setenv("AGENTHARNESS_WORKSPACE_WRITABLE", "yes")
+    cfg = load_config()
+    assert cfg.workspace_dir == "/elsewhere"
+    assert cfg.workspace_writable is True  # env overrides the file, both ways

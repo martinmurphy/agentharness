@@ -9,4 +9,5 @@ build/
 dist/
 tests/
 skills/
+workspace/
 config.yaml

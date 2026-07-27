@@ -9,3 +9,6 @@ dist/
 .venv/
 venv/
 config.yaml
+# The workspace mount point is tracked; whatever the model puts in it is not.
+workspace/*
+!workspace/.gitkeep

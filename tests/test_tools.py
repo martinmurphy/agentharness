@@ -10,6 +10,14 @@ from agentharness.tools.greet import greet_tool
 from agentharness.tools.model_tools import list_models_tool
 from agentharness.tools.registry import ToolRegistry, build_default_registry
 from agentharness.tools.subagent_tools import spawn_subagent_tool
+from agentharness.workspace import Workspace
+
+
+def _ws(tmp_path, *, writable=True):
+    """A writable workspace under tmp_path, created so the tools can use it."""
+    root = tmp_path / "workspace"
+    root.mkdir(exist_ok=True)
+    return Workspace(root=root, writable=writable)
 
 
 def test_greet_styles():
@@ -61,17 +69,29 @@ def test_duplicate_registration_rejected():
         reg.register(greet_tool())
 
 
+_BASE_TOOLS = {
+    "greet",
+    "list_providers",
+    "web_fetch",
+    "web_search",
+    "read_skill",
+    "read_skill_file",
+}
+_FS_READ_TOOLS = {"list_dir", "read_file"}
+_FS_WRITE_TOOLS = {"write_file", "make_dir"}
+
+
 def test_default_registry_includes_skill_and_provider_tools(tmp_path):
     skillset = load_skills(tmp_path)
-    reg = build_default_registry(skillset)
-    assert set(reg.names()) == {
-        "greet",
-        "list_providers",
-        "web_fetch",
-        "web_search",
-        "read_skill",
-        "read_skill_file",
-    }
+    reg = build_default_registry(skillset, _ws(tmp_path))
+    assert set(reg.names()) == _BASE_TOOLS | _FS_READ_TOOLS | _FS_WRITE_TOOLS
+
+
+def test_read_only_workspace_omits_write_tools(tmp_path):
+    reg = build_default_registry(load_skills(tmp_path), _ws(tmp_path, writable=False))
+    assert set(reg.names()) == _BASE_TOOLS | _FS_READ_TOOLS
+    # Absent entirely, not present-but-refusing: the model is never offered them.
+    assert not any(s.name in _FS_WRITE_TOOLS for s in reg.specs())
 
 
 def _models_tool(active="anthropic", by_name=None):
@@ -153,7 +173,7 @@ def test_list_providers_tool(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "x")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("GEMINI_API_KEY", "y")
-    reg = build_default_registry(load_skills(tmp_path))
+    reg = build_default_registry(load_skills(tmp_path), _ws(tmp_path))
     result = reg.dispatch(ToolCall(id="c", name="list_providers", arguments={}))
     assert not result.is_error
     assert "anthropic (key from ANTHROPIC_API_KEY): key set" in result.content
@@ -173,14 +193,14 @@ def _skillset_with_one(tmp_path):
 
 
 def test_read_skill_tool_returns_body(tmp_path):
-    reg = build_default_registry(_skillset_with_one(tmp_path))
+    reg = build_default_registry(_skillset_with_one(tmp_path), _ws(tmp_path))
     result = reg.dispatch(ToolCall(id="c", name="read_skill", arguments={"name": "demo"}))
     assert not result.is_error
     assert "full body here" in result.content
 
 
 def test_read_skill_file_tool(tmp_path):
-    reg = build_default_registry(_skillset_with_one(tmp_path))
+    reg = build_default_registry(_skillset_with_one(tmp_path), _ws(tmp_path))
     result = reg.dispatch(
         ToolCall(id="c", name="read_skill_file",
                  arguments={"skill": "demo", "path": "references/R.md"})
@@ -190,7 +210,7 @@ def test_read_skill_file_tool(tmp_path):
 
 
 def test_read_skill_file_traversal_is_error(tmp_path):
-    reg = build_default_registry(_skillset_with_one(tmp_path))
+    reg = build_default_registry(_skillset_with_one(tmp_path), _ws(tmp_path))
     result = reg.dispatch(
         ToolCall(id="c", name="read_skill_file",
                  arguments={"skill": "demo", "path": "../../etc/hostname"})
@@ -473,3 +493,82 @@ def test_web_search_request_failure_is_error(monkeypatch):
     )
     assert result.is_error
     assert "search request failed" in result.content
+
+
+# ---- filesystem tools (dispatch level) ------------------------------------
+
+
+def _fs_reg(tmp_path, *, writable=True):
+    return build_default_registry(load_skills(tmp_path), _ws(tmp_path, writable=writable))
+
+
+def test_list_dir_and_read_file_tools(tmp_path):
+    reg = _fs_reg(tmp_path)
+    (tmp_path / "workspace" / "notes.md").write_text("hello", encoding="utf-8")
+
+    listing = reg.dispatch(ToolCall(id="c", name="list_dir", arguments={}))
+    assert not listing.is_error
+    assert "notes.md" in listing.content
+
+    read = reg.dispatch(ToolCall(id="c", name="read_file", arguments={"path": "notes.md"}))
+    assert not read.is_error
+    assert read.content == "hello"
+
+
+def test_read_file_traversal_is_error(tmp_path):
+    reg = _fs_reg(tmp_path)
+    result = reg.dispatch(
+        ToolCall(id="c", name="read_file", arguments={"path": "../../etc/hostname"})
+    )
+    assert result.is_error
+    assert "escapes the workspace" in result.content
+
+
+def test_read_file_requires_path(tmp_path):
+    result = _fs_reg(tmp_path).dispatch(ToolCall(id="c", name="read_file", arguments={}))
+    assert result.is_error
+    assert "path" in result.content
+
+
+def test_write_file_then_read_back(tmp_path):
+    reg = _fs_reg(tmp_path)
+    written = reg.dispatch(
+        ToolCall(id="c", name="write_file", arguments={"path": "out.md", "content": "written"})
+    )
+    assert not written.is_error
+    assert (tmp_path / "workspace" / "out.md").read_text(encoding="utf-8") == "written"
+
+    read = reg.dispatch(ToolCall(id="c", name="read_file", arguments={"path": "out.md"}))
+    assert read.content == "written"
+
+
+def test_write_file_requires_content(tmp_path):
+    result = _fs_reg(tmp_path).dispatch(
+        ToolCall(id="c", name="write_file", arguments={"path": "out.md"})
+    )
+    assert result.is_error
+    assert "content" in result.content
+
+
+def test_make_dir_tool_then_write_into_it(tmp_path):
+    reg = _fs_reg(tmp_path)
+    made = reg.dispatch(ToolCall(id="c", name="make_dir", arguments={"path": "reports/2026"}))
+    assert not made.is_error
+
+    written = reg.dispatch(
+        ToolCall(
+            id="c",
+            name="write_file",
+            arguments={"path": "reports/2026/q3.md", "content": "ok"},
+        )
+    )
+    assert not written.is_error
+    assert (tmp_path / "workspace" / "reports" / "2026" / "q3.md").is_file()
+
+
+def test_write_tools_unavailable_on_read_only_workspace(tmp_path):
+    result = _fs_reg(tmp_path, writable=False).dispatch(
+        ToolCall(id="c", name="write_file", arguments={"path": "out.md", "content": "x"})
+    )
+    assert result.is_error
+    assert "unknown tool" in result.content

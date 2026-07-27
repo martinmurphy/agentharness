@@ -360,6 +360,13 @@ change to the agent loop:
 - **`web_search` tool** — keyless DuckDuckGo search (stdlib `urllib` + `html.parser`) returning
   title/URL/snippet; pairs with `web_fetch` (search finds, fetch reads). Keyed backends are a
   future seam (`future-work.md`).
+- **Workspace filesystem tools** — a second bind-mounted directory (`/workspace`, config
+  `workspace_dir`) and four tools over it: `list_dir`, `read_file`, `write_file`, `make_dir`.
+  A new `workspace.py` owns confinement (the same resolve + `is_relative_to` check as
+  `read_skill_file`) and the IO; `tools/fs_tools.py` owns the `Tool` wrappers and the write
+  gate — `workspace_writable: false` returns only the read tools, so the model is never
+  offered a tool that would refuse. No delete or move, by choice. Detailed design note:
+  [`plan-workspace-tools.md`](plan-workspace-tools.md).
 - **`spawn_subagent` tool** — delegation: the model spawns a fresh state (defaulting to its own
   provider/model, or a different one), runs a full tool/skill loop until it answers, and gets the
   answer back. Recursion-safe (subagents get the base toolset without `spawn_subagent`); the

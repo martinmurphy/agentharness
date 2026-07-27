@@ -40,6 +40,10 @@ class Config:
     show_thinking: bool = False
     max_tool_iterations: int = 10
     skills_dir: str = "./skills"
+    # Read/write scratch directory the filesystem tools are confined to. Set
+    # workspace_writable false to register only the read tools.
+    workspace_dir: str = "./workspace"
+    workspace_writable: bool = True
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     # Per-provider settings, e.g. {"openai": {"base_url": "http://localhost:11434/v1"}}
     providers: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -60,6 +64,10 @@ def _config_path() -> Path | None:
     return None
 
 
+def _as_bool(v: Any) -> bool:
+    return str(v).strip().lower() in ("1", "true", "yes", "on")
+
+
 # Fields that accept a scalar env override, with their coercion function.
 _SCALAR_FIELDS: dict[str, Any] = {
     "provider": str,
@@ -67,9 +75,11 @@ _SCALAR_FIELDS: dict[str, Any] = {
     "max_tokens": int,
     "effort": str,
     "thinking_budget": int,
-    "show_thinking": lambda v: str(v).strip().lower() in ("1", "true", "yes", "on"),
+    "show_thinking": _as_bool,
     "max_tool_iterations": int,
     "skills_dir": str,
+    "workspace_dir": str,
+    "workspace_writable": _as_bool,
     "system_prompt": str,
 }
 

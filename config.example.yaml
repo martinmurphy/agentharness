@@ -16,7 +16,10 @@ effort: high                 # low | medium | high | xhigh | max (Anthropic only
 #                            # 1024 <= N < max_tokens. Ignored on current models.
 show_thinking: false         # render model reasoning (Anthropic summary / Gemini thoughts)
 max_tool_iterations: 10      # cap on tool round-trips within one turn
-skills_dir: ./skills         # inside the container this is /skills (mounted)
+skills_dir: ./skills         # inside the container this is /skills (mounted, read-only)
+workspace_dir: ./workspace   # inside the container this is /workspace (mounted, read-write)
+workspace_writable: true     # false registers only list_dir/read_file — the write
+                             # tools are not advertised to the model at all
 
 # system_prompt: |
 #   You are a helpful assistant running inside agentharness.

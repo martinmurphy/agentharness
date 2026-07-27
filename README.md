@@ -15,12 +15,17 @@ model.
   everything else.
 - **Tools** — model-callable functions in a registry: `greet` (a trivial
   example that proves the loop), `read_skill` / `read_skill_file` (Agent Skills
-  progressive disclosure), `web_search` / `web_fetch` (find and read web pages),
-  `list_providers` / `list_models` (discover configured providers and their
-  models), and `spawn_subagent` (delegate to a nested agent). See *Extending*.
+  progressive disclosure), `list_dir` / `read_file` / `write_file` / `make_dir`
+  (the workspace directory), `web_search` / `web_fetch` (find and read web
+  pages), `list_providers` / `list_models` (discover configured providers and
+  their models), and `spawn_subagent` (delegate to a nested agent). See
+  *Extending*.
 - **Skills** — discovered at runtime from a directory (bind-mounted from the
   host in the container), validated against the spec, and advertised to the
   model as a catalog it loads on demand.
+- **Workspace** — a second bind-mounted directory the model can read and write
+  through the filesystem tools, so a turn's output survives the process. Every
+  path is confined to it.
 - **Multiple states** — independent in-memory conversations, each with its own
   history, system prompt, provider, and model.
 - **Providers** — Anthropic, Google Gemini (AI Studio), and any
@@ -32,15 +37,23 @@ model.
 ```bash
 make build
 
-# REPL — mounts ./skills read-only and passes your API keys through.
+# REPL — mounts ./skills read-only, ./workspace read-write, passes API keys through.
 ANTHROPIC_API_KEY=sk-... make run
 
 # Or directly:
 podman run --rm -it \
+  --userns=keep-id:uid=1001,gid=0 \
   -e ANTHROPIC_API_KEY \
   -v "$PWD/skills:/skills:ro,Z" \
+  -v "$PWD/workspace:/workspace:Z" \
   agentharness
 ```
+
+The image runs as UID 1001, which under rootless podman maps to a subuid that
+cannot write a host-owned directory — hence `--userns=keep-id:uid=1001,gid=0`,
+which maps *you* onto that UID so files the model writes come back owned by you.
+Drop it with `make run USERNS=` if your setup doesn't need it (it is usually
+unnecessary on macOS). Read-only mounts like `/skills` never needed it.
 
 `--list-skills` needs no API key and no model call:
 
@@ -62,7 +75,7 @@ python3 -m venv .venv
 .venv/bin/agentharness --list-skills     # no API key needed
 ANTHROPIC_API_KEY=sk-... .venv/bin/agentharness
 
-.venv/bin/pytest -q                      # 115 tests, no network
+.venv/bin/pytest -q                      # 165 tests, no network
 .venv/bin/ruff check .
 ```
 
@@ -78,6 +91,7 @@ ANTHROPIC_API_KEY=sk-... .venv/bin/agentharness
 /skills                                  list loaded skills (and load failures)
 /skill <name>                            print a skill's SKILL.md body
 /tools                                   list registered tools
+/workspace                               show the workspace directory and its contents
 /providers                               list providers and whether their keys are set
 /models                                  list models the active provider can reach
 /reload                                  re-scan the skills directory
@@ -154,6 +168,16 @@ providers:
   rate-limited); `web_fetch` is an SSRF surface (scheme is http/https-only and
   the body is size-capped, but host allowlisting is future work). See
   `docs/future-work.md`.
+- **Filesystem** — four tools over the bind-mounted workspace: `list_dir`
+  (optionally recursive), `read_file` (UTF-8 text, size-capped), `write_file`
+  (`overwrite` / `append` / `create` modes), and `make_dir` (creates parents).
+  Every path is resolved and required to stay under the workspace root, which
+  rejects `..`, absolute paths, and symlink escapes in one check
+  (`workspace.resolve_in`). `write_file` deliberately does *not* create parent
+  directories — a missing parent is an error naming `make_dir`, so a mistyped
+  path fails loudly. There is no delete or move: a bad call can clobber one file,
+  not erase a tree. Set `workspace_writable: false` and the two write tools are
+  never registered, so the model isn't offered them at all.
 - **Delegation** — the `spawn_subagent` tool lets the model create a fresh
   conversation state (defaulting to its own provider/model, or a different one),
   run a full tool/skill loop on it until it produces an answer, and get that
@@ -177,18 +201,22 @@ src/agentharness/
   repl.py              REPL loop and slash commands
   agent.py             provider-neutral agent loop (yields events)
   state.py             ConversationState + StateManager (in-memory)
+  workspace.py         workspace root + confined filesystem operations
   skills/              Skill model, discovery, validation, catalog
-  tools/               registry + built-in tools (greet, skills, web,
+  tools/               registry + built-in tools (greet, skills, files, web,
                        providers, models, subagent)
   providers/           neutral model + Anthropic / Gemini / OpenAI adapters
 skills/                example skills (bind-mounted to /skills at runtime)
+workspace/             the model's read-write area (bind-mounted to /workspace)
 Containerfile          UBI10 + python3.14
 ```
 
 ## Scope (v1)
 
-In-memory state only (nothing persists across restarts); skill `scripts/` are
-readable as text but never executed; no streaming yet. Each is a clean addition
-against the existing seams. Design notes live in [`docs/plan.md`](docs/plan.md)
+Conversation state is in-memory only (histories do not survive a restart —
+files the model wrote to the workspace do); skill `scripts/` are readable as
+text but never executed, and nothing here executes anything either — `write_file`
+writes bytes; no streaming yet. Each is a clean addition against the existing
+seams. Design notes live in [`docs/plan.md`](docs/plan.md)
 (the build plan) and [`docs/future-work.md`](docs/future-work.md) (deferred
 items, incl. `web_fetch` SSRF allowlisting and keyed `web_search` backends).

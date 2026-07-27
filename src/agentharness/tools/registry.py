@@ -72,13 +72,15 @@ class ToolRegistry:
         return ToolResult(call_id=call.id, content=content, is_error=False)
 
 
-def build_default_registry(skillset) -> ToolRegistry:
-    """Build the registry with the example ``greet`` tool and the skill tools.
+def build_default_registry(skillset, workspace) -> ToolRegistry:
+    """Build the registry with the example ``greet`` tool, skill, and file tools.
 
-    ``skillset`` is a live reference; the skill tools read from it at call time,
-    so a ``/reload`` that replaces the SkillSet is picked up if callers rebuild
-    the registry (see repl.reload).
+    ``skillset`` and ``workspace`` are live references; the tools read from them
+    at call time, so a ``/reload`` that replaces either is picked up if callers
+    rebuild the registry (see repl.reload). A non-writable workspace contributes
+    only its read tools.
     """
+    from agentharness.tools.fs_tools import make_fs_tools
     from agentharness.tools.greet import greet_tool
     from agentharness.tools.provider_tools import list_providers_tool
     from agentharness.tools.search_tools import web_search_tool
@@ -91,5 +93,7 @@ def build_default_registry(skillset) -> ToolRegistry:
     registry.register(web_fetch_tool())
     registry.register(web_search_tool())
     for tool in make_skill_tools(skillset):
+        registry.register(tool)
+    for tool in make_fs_tools(workspace):
         registry.register(tool)
     return registry
