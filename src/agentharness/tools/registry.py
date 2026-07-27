@@ -10,9 +10,16 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from agentharness.providers.base import ToolCall, ToolResult, ToolSpec
+
+if TYPE_CHECKING:
+    # Type-only: importing these at runtime would be needless, and the tool
+    # modules below are imported lazily to break a genuine cycle with Tool.
+    from agentharness.config import Config
+    from agentharness.skills.loader import SkillSet
+    from agentharness.workspace import Workspace
 
 Handler = Callable[[dict[str, Any]], str]
 
@@ -72,7 +79,11 @@ class ToolRegistry:
         return ToolResult(call_id=call.id, content=content, is_error=False)
 
 
-def build_default_registry(skillset, workspace, config=None) -> ToolRegistry:
+def build_default_registry(
+    skillset: SkillSet,
+    workspace: Workspace,
+    config: Config | None = None,
+) -> ToolRegistry:
     """Build the registry with the example ``greet`` tool, skill, and file tools.
 
     ``skillset`` and ``workspace`` are live references; the tools read from them

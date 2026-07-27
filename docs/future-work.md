@@ -39,18 +39,68 @@ block requests to private/loopback addresses or cloud metadata endpoints
 prompt-injected by fetched content could be steered into probing internal
 services or exfiltrating instance credentials.
 
+Two things have raised this since it was first written, and it is now the item
+worth doing first:
+
+- **The model can persist what it fetches.** `write_file` lands in a
+  host-mounted directory, so data pulled from a metadata endpoint or a LAN
+  service needs no outbound exfiltration channel — it can simply be written
+  somewhere that gets synced or committed.
+- **A container-to-host route is now routine.** Reaching a local model server
+  means `host.containers.internal` resolves and works, so running in a container
+  is not a boundary.
+
+Both tools are in the base registry, so subagents have them too, and a
+subagent's turn is far less visible than the main conversation.
+
 **Why deferred.** Blocking loopback/private ranges outright would break a
 legitimate dev-harness use — hitting a local API or `localhost` test server. The
 right design is a *configurable* policy (default deny internal, opt-in
 allowlist), which is more than a one-liner and wasn't in the tool's initial ask.
 
-**Sketch of the fix.** A config option, e.g. `web_fetch: {allow_private: false,
-allowed_hosts: [...]}`. Resolve the URL's host to its IPs before the request and
-reject private/loopback/link-local/ULA ranges unless the host is on the
-allowlist (resolve-then-check, and guard against DNS-rebinding by pinning the
-resolved IP for the actual connection). Surface rejections as a normal tool
-error. Keep the default safe (deny internal) so the capability is opt-in for
-internal targets.
+**Sketch of the fix.** Default-deny by *category of the resolved IP*, using
+stdlib `ipaddress`: `is_loopback`, `is_private`, `is_link_local`, `is_reserved`,
+`is_unspecified`, `is_multicast`. This needs no knowledge of the local topology.
+Measured on a macOS podman setup it correctly denies `127.0.0.1`,
+`192.168.127.254` (`host.containers.internal` under gvproxy) and the container's
+own `10.88.0.0/16` subnet, while leaving public hosts alone.
+
+Re-permit through an allowlist keyed on **host and port**:
+
+```yaml
+web_fetch:
+  allow_private: false
+  allowed_hosts: [host.containers.internal:1234]
+```
+
+Port matters: an IP-only entry for `127.0.0.1` re-opens `:5432`, `:6379` and
+every other locally bound service. Compare on `(resolved IP, effective port)`,
+handling implicit `:80`/`:443`.
+
+**Resolve once, check that IP, connect to the pinned IP.** One mechanism, three
+properties: the allowlist survives the address changing (`host.containers.internal`
+is `192.168.127.254` under gvproxy but `10.0.2.2` under slirp4netns and different
+again on native Linux — never hardcode it); DNS rebinding cannot swap the address
+between check and connect; and alternate spellings (`127.1`, `2130706433`,
+`[::ffff:127.0.0.1]`) cannot fool it, because the string is never inspected.
+
+Two traps make the naive version wrong:
+
+1. **Redirects.** `urlopen` follows up to 10 hops via `HTTPRedirectHandler`, so
+   guarding only the input URL is bypassed by an allowed host returning a `302`
+   to `169.254.169.254`. That handler's own scheme allowlist is
+   `('http', 'https', 'ftp')` and the default opener includes `FTPHandler`, so a
+   redirect can also escape the http/https restriction the tool enforces up
+   front. Either re-check every hop or stop following redirects and surface the
+   `Location` to the model.
+2. **Pinning breaks TLS.** Connecting to an IP for an `https` target breaks SNI
+   and certificate validation unless the original hostname is carried through as
+   both the `Host` header and the TLS server name. It doesn't bite a plain-http
+   local server; it does bite any allowlisted https host. This is why the fix is
+   a custom opener rather than a check bolted in front of `urlopen`.
+
+Surface rejections as ordinary tool errors. Tests need no network: stub
+resolution and the opener.
 
 ## Pluggable / keyed web_search backends
 
@@ -64,8 +114,40 @@ keyed backend (Brave, Tavily) needs an account and key and was out of scope for
 the first pass.
 
 **Sketch of the fix.** Add a keyed backend function alongside `_duckduckgo_search`
-— e.g. `_brave_search(query, count)` reading `BRAVE_API_KEY` from the env (REST
-via `urllib`, no new dependency) — returning the same `SearchResult` list (the
-shared contract). Add a `search_backend` config field (default `"duckduckgo"`) to
-select it, and thread it into `web_search_tool`. Keep DuckDuckGo as the keyless
-default so search still works out of the box.
+— e.g. `_brave_search(query, count)` (REST via `urllib`, no new dependency) —
+returning the same `SearchResult` list (the shared contract). Add a
+`search_backend` config field (default `"duckduckgo"`) to select it, and thread
+it into `web_search_tool`. Keep DuckDuckGo as the keyless default so search still
+works out of the box.
+
+The config convention this needs now exists: provider aliases introduced
+`api_key_env`, which names the environment variable to read rather than holding
+the secret. A keyed search backend should reuse that pattern rather than invent
+a second one.
+
+## Unverified: does the tightened subagent prompt curb exploration?
+
+**Problem.** A subagent asked to "respond only with your model name" once made
+five tool calls — `list_models`, `list_dir`, `read_file`, `list_providers`,
+`list_dir('..')` — exhausting a provider's free-tier minute quota mid-run.
+`SUBAGENT_SYSTEM` (`repl.py`) was rewritten to make tool use conditional on the
+task rather than encouraged, but that is a prompt change and has not been
+observed working.
+
+**Why open.** Only a real subagent run against a real provider tells you.
+`list_models()` on that particular task is legitimate and should still happen;
+what should stop is the unrelated file and provider poking.
+
+**If it doesn't hold.** The structural fix is to stop `effective_system()` from
+advertising the workspace on the subagent path. It is evaluated *after*
+`states.new()` makes the subagent active, so a subagent inherits the workspace
+line written for the main conversation.
+
+## Small corrections
+
+Not deferred by design — simply not done yet:
+
+- `docs/plan-workspace-tools.md` pins stale test counts (`115 -> 165`, "165 tests
+  pass") at lines 132 and 153. Either update or reword so no number is pinned.
+- The README's "Providers" bullet still describes three backends and doesn't
+  mention that `providers:` is now a registry of aliases.
