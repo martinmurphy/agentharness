@@ -207,6 +207,73 @@ The tool description should say the listing is filtered by default and name the
 flag; a model that reads "lists the contents of a directory" and gets a filtered
 result has been misled by the schema.
 
+## Prompt caching
+
+**Problem.** Every model call re-sends and re-pays for a large fixed prefix. Measured
+on a real turn: 2,846 input tokens to answer "what is the capital of Ireland" — of
+which roughly 1,260 is tool schemas (10 tools; `web_fetch` alone ~255), ~110 the
+skills catalog, ~60 the system prompt, ~25 the workspace line, and the rest
+provider-side tool-use scaffolding. That block is byte-identical on every call, and
+a turn using tools makes several calls. On short conversations it is the dominant
+cost.
+
+`docs/plan.md` lists caching as out of scope for v1, which predates knowing the
+size of that prefix.
+
+**Why deferred.** It is not one change. Caching is provider-specific — Anthropic
+takes an explicit `cache_control` marker, OpenAI caches automatically with no API,
+Gemini has its own mechanism — so it lands in each adapter, not in the loop. And
+the neutral `Usage` (`providers/base.py`) has only `input_tokens` / `output_tokens`,
+so cache activity is currently invisible: `/usage` and the per-turn line would keep
+reporting full-price totals and silently misreport the moment caching is on.
+
+**Sketch of the fix.**
+
+*Anthropic adapter.* Render order is `tools` → `system` → `messages`, and the whole
+thing is a prefix match — one byte earlier invalidates everything after. That order
+is what makes this cheap here: a single breakpoint on the last system block caches
+the tool schemas *and* the system prompt together, which is the entire fixed cost
+above. Max 4 breakpoints per request. For multi-turn, a second breakpoint on the
+last content block of the most recent turn extends the cached prefix as the
+conversation grows.
+
+*Accounting.* Add `cache_creation_input_tokens` and `cache_read_input_tokens` to the
+neutral `Usage` and map them in each adapter (`cache_read_input_tokens` on
+Anthropic, `prompt_tokens_details.cached_tokens` on OpenAI,
+`cached_content_token_count` on Gemini — the read side is genuinely neutral; cache
+*writes* are an Anthropic concept and will be zero elsewhere). Then `input_tokens`
+means "uncached remainder", not "prompt size" — total prompt is the sum of all
+three, and both `/usage` and the per-turn line need updating or they will
+understate.
+
+*Economics.* Reads are ~0.1× base input price; writes are 1.25× at the default
+5-minute TTL, 2× at `ttl: "1h"`. Break-even is two requests at 5 minutes, three at
+an hour. A REPL turn makes several calls in quick succession, so the default TTL is
+right and the payback is immediate.
+
+**Four traps, three of which this harness walks straight into:**
+
+1. **Minimum cacheable prefix is model-dependent and not monotonic** — 512 tokens on
+   Opus 5, 1024 on Opus 4.8 and Sonnet 5, 2048 on Opus 4.7, but **4096 on Opus 4.6
+   and Haiku 4.5**. The ~2,850-token prefix measured above caches on Opus 4.8 and
+   silently does not on Opus 4.6 — no error, just `cache_creation_input_tokens: 0`.
+2. **The 20-block lookback.** A breakpoint searches back at most 20 content blocks
+   for a prior entry. `max_tool_iterations` defaults to 10, and each round-trip adds
+   an assistant message plus a tool message with N results — a long tool loop can
+   exceed 20 blocks in a single turn and silently miss. Fix: an intermediate
+   breakpoint roughly every 15 blocks.
+3. **`/reload` and the subagent registry both change the tool list**, which renders
+   at position 0 and invalidates everything. `/reload` is expected. The subagent
+   registry legitimately differs (no `spawn_subagent`), so subagents keep their own
+   cache entry — correct, but it means a delegating turn pays two cold writes.
+4. **The workspace line is conditional** on the root existing (`effective_system`).
+   Creating or removing the directory mid-session changes the system prefix. Harmless
+   but worth knowing when a cache-hit rate moves for no obvious reason.
+
+**Verifying.** `cache_read_input_tokens` staying at zero across repeated identical
+prefixes means something is invalidating silently — that is the check to write a
+test around, not the mere presence of a `cache_control` key.
+
 ## Small corrections
 
 Not deferred by design — simply not done yet:
