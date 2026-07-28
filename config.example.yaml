@@ -53,3 +53,49 @@ providers:
   #   type: openai
   #   base_url: https://api.together.xyz/v1
   #   api_key_env: TOGETHER_API_KEY
+
+# MCP servers to connect to. Each entry's tools are registered as
+# mcp__<server>__<tool> and become ordinary harness tools.
+#
+# Keys never live in this file here either: token_env names the variable
+# holding a bearer token, ${VAR} in a header value is an environment lookup,
+# and env_pass names the EXTRA variables a stdio subprocess gets on top of the
+# small safe set it inherits (PATH, HOME, SHELL, TERM, USER, LOGNAME). Nothing
+# else reaches it.
+#
+# Note that a stdio server is arbitrary local command execution declared in a
+# config file — that is what the transport is. The container image has no npx
+# or uvx, so stdio servers there need a runtime added to the image; http is the
+# container-native transport.
+mcp_servers: {}
+
+# Examples — uncomment and replace the `{}` above.
+#
+  # A local server, run as a subprocess.
+  # fs:
+  #   type: stdio
+  #   command: uvx
+  #   args: [mcp-server-filesystem, /workspace]
+  #   env_pass: [HOME]
+  #   cwd: /workspace          # optional working directory
+
+  # A remote server with a static token.
+  # github:
+  #   type: http
+  #   url: https://api.githubcopilot.com/mcp/
+  #   token_env: GITHUB_MCP_TOKEN
+  #   tools: [create_issue, search_code]   # optional allowlist
+  #   timeout: 15                          # seconds; default 15
+  #   enabled: true                        # false keeps the entry, skips it
+
+  # A remote server behind OAuth 2.1. Host only: it needs a browser and a
+  # writable config directory, so in the container it is refused with a message
+  # pointing at token_env. Tokens are cached 0600 under $XDG_CONFIG_HOME.
+  # internal:
+  #   type: http
+  #   url: https://mcp.corp.example/mcp
+  #   auth: oauth
+  #   callback_port: 8765      # 0 (default) picks a free port
+  #   oauth_timeout: 300       # how long you have to finish in the browser
+  #   headers:
+  #     X-Tenant: ${CORP_TENANT}

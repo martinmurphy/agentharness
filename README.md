@@ -20,6 +20,10 @@ model.
   pages), `list_providers` / `list_models` (discover configured providers and
   their models), and `spawn_subagent` (delegate to a nested agent). See
   *Extending*.
+- **MCP servers** — tools from configuration rather than code: local (stdio) or
+  remote (streamable HTTP) [MCP](https://modelcontextprotocol.io) servers,
+  several at once, authenticated with env-var tokens or OAuth 2.1. See *MCP
+  servers*.
 - **Skills** — discovered at runtime from a directory (bind-mounted from the
   host in the container), validated against the spec, and advertised to the
   model as a catalog it loads on demand.
@@ -95,6 +99,7 @@ ANTHROPIC_API_KEY=sk-... .venv/bin/agentharness
 /providers                               list providers and whether their keys are set
 /models                                  list models the active provider can reach
 /reload                                  re-scan the skills directory
+/mcp [tools S | reconnect S | login S]   MCP servers, their tools, status, and OAuth login
 /usage [--all]                           token usage for the active state (or every state)
 /quit                                    exit
 ```
@@ -196,6 +201,96 @@ that *is* set is never overridden by that placeholder, so pointing a built-in at
 a proxy still uses your real key. `/providers` shows keyless endpoints as
 `no key needed` rather than `no key`.
 
+### MCP servers
+
+Tools can also come from [MCP](https://modelcontextprotocol.io) servers, which
+means from configuration rather than from code. Each entry under `mcp_servers:`
+is one server; every tool it offers is registered as `mcp__<server>__<tool>` and
+is thereafter an ordinary harness tool — it appears in `/tools`, subagents get
+it, and the agent loop dispatches it like any other.
+
+```yaml
+mcp_servers:
+  fs:                                    # a local subprocess
+    type: stdio
+    command: uvx
+    args: [mcp-server-filesystem, /workspace]
+    env_pass: [HOME]                     # forward named variables only
+
+  github:                                # a remote server, static token
+    type: http
+    url: https://api.githubcopilot.com/mcp/
+    token_env: GITHUB_MCP_TOKEN          # -> Authorization: Bearer <value>
+    tools: [create_issue, search_code]   # optional allowlist
+
+  internal:                              # a remote server, OAuth 2.1 (host only)
+    type: http
+    url: https://mcp.corp.example/mcp
+    auth: oauth
+    headers:
+      X-Tenant: ${CORP_TENANT}           # ${...} is an env lookup
+```
+
+Common keys: `enabled` (default true — a declared server you can switch off),
+`timeout` (seconds, default 15), and `tools` (an allowlist; an explicit empty
+list advertises nothing). stdio servers also take `args`, `env_pass` and `cwd`;
+HTTP servers take `headers`, `token_env`, `auth`, `callback_port` and
+`oauth_timeout`.
+
+**Keys never live in the config**, same rule as providers: `token_env` names the
+variable holding a bearer token, `${VAR}` in a header value is an environment
+lookup, and `env_pass` names the extra variables a stdio subprocess is given. A
+missing variable fails that one server with a message naming it.
+
+A stdio server inherits only a small safe set by default (`PATH`, `HOME`,
+`SHELL`, `TERM`, `USER`, `LOGNAME` — a server launched as `uvx …` needs `PATH`
+to exist at all); `env_pass` adds to that set, and nothing else reaches the
+subprocess. So a server gets the credentials it was granted and no others.
+
+Servers connect concurrently at startup, because the tool list has to be known
+before the first turn. One that fails costs you that server and nothing else:
+the reason is recorded and shown by `/mcp`, which also lists what each server
+contributed and can `reconnect` one that was down.
+
+```
+[default] › /mcp
+  fs      stdio  connected  4 tool(s)  (env: HOME)
+  github  http   connected  12 tool(s)  (bearer: GITHUB_MCP_TOKEN)
+  legacy  stdio  failed  see below
+  ! legacy: mcp server 'legacy': McpError: Connection closed
+      ModuleNotFoundError: No module named 'legacy_server'
+```
+
+A failing server's own stderr is captured, not printed — it would otherwise
+scribble over the REPL — and the tail is quoted back in the error, which is
+usually where a server that would not start says why.
+
+**OAuth 2.1 is host-only.** `auth: oauth` runs the full flow (discovery, dynamic
+client registration, PKCE, refresh); the authorisation URL is printed and opened
+in a browser, and a one-shot listener on `127.0.0.1` catches the redirect. Tokens
+are cached in `$XDG_CONFIG_HOME/agentharness/mcp-tokens.json` (mode `0600`) and
+reused on later runs; `/mcp login <server>` forgets the grant and authorises
+again. Inside the container there is no browser and no writable config
+directory, so `auth: oauth` is refused there with a message pointing at
+`token_env` — use a token issued outside the container instead.
+
+Two things worth knowing before pointing this at a server you do not control:
+
+- **A `stdio` entry is arbitrary local command execution** written in a config
+  file. That is what the transport is. The container image ships no `npx` or
+  `uvx`, so stdio servers there need a runtime added to the image — HTTP is the
+  container-native path.
+- **Tool names and descriptions are untrusted text** injected into the model's
+  context every turn. Namespacing stops a server shadowing `write_file`; the
+  per-server `tools:` allowlist limits what a chatty or hostile server can put in
+  front of the model at all.
+
+One operational gotcha: MCP servers validate the `Host` header against DNS
+rebinding. Reaching one from inside the container by a different name — the
+usual `http://host.containers.internal:PORT/mcp` — gives `421 Misdirected
+Request` until that name is in the *server's* allowed hosts. That is the server
+refusing, not the harness.
+
 ## Extending
 
 - **Add a tool** — write a handler and a `Tool` (see `tools/greet.py`, or
@@ -229,6 +324,12 @@ a proxy still uses your real key. `/providers` shows keyless endpoints as
   answer back as the tool result. Subagents get the base toolset without
   `spawn_subagent`, so delegation is one level deep. Their processing is logged
   to the REPL, and the subagent's state persists (inspect it with `/switch`).
+- **Add an MCP server** — no code: add an entry under `mcp_servers:` (see *MCP
+  servers*). Its tools are discovered at startup and registered alongside the
+  built-in ones. `agentharness/mcp/` holds the client: `config.py` validates the
+  block, `runtime.py` is the sync/async bridge (one loop thread, one supervisor
+  task per server), `manager.py` owns the connections and decides tool identity,
+  and `oauth.py` supplies token storage and the browser leg.
 - **Add a skill** — create `skills/<name>/SKILL.md` with `name` (matching the
   directory) and `description` frontmatter. Optional `references/`, `assets/`,
   `scripts/` files are read as text via `read_skill_file`. Run `/reload`.
@@ -250,8 +351,9 @@ src/agentharness/
   state.py             ConversationState + StateManager (in-memory)
   workspace.py         workspace root + confined filesystem operations
   skills/              Skill model, discovery, validation, catalog
+  mcp/                 MCP client: config, runtime bridge, manager, oauth
   tools/               registry + built-in tools (greet, skills, files, web,
-                       providers, models, subagent)
+                       providers, models, subagent, mcp)
   providers/           neutral model + Anthropic / Gemini / OpenAI adapters
 skills/                example skills (bind-mounted to /skills at runtime)
 workspace/             the model's read-write area (bind-mounted to /workspace)

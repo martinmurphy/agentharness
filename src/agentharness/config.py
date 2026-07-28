@@ -49,6 +49,10 @@ class Config:
     system_prompt: str = DEFAULT_SYSTEM_PROMPT
     # Per-provider settings, e.g. {"openai": {"base_url": "http://localhost:11434/v1"}}
     providers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # MCP servers to connect to, name -> settings block. Held raw here for the
+    # same reason as ``providers``: this module knows nothing about what the
+    # blocks mean. agentharness.mcp.config parses and validates them.
+    mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def provider_options(self, name: str) -> dict[str, Any]:
         """Return the settings block for a named provider (empty dict if none)."""
@@ -105,7 +109,8 @@ def load_config() -> Config:
         elif name in data:
             kwargs[name] = data[name]
 
-    if "providers" in data and isinstance(data["providers"], dict):
-        kwargs["providers"] = data["providers"]
+    for block in ("providers", "mcp_servers"):
+        if block in data and isinstance(data[block], dict):
+            kwargs[block] = data[block]
 
     return Config(**kwargs)

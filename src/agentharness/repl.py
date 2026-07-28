@@ -13,10 +13,14 @@ from pathlib import Path
 
 from agentharness import agent
 from agentharness.config import Config, load_config
+from agentharness.mcp import oauth
+from agentharness.mcp.config import parse_servers
+from agentharness.mcp.manager import McpManager
 from agentharness.providers.base import Message, Provider, TextBlock, Usage
 from agentharness.providers.factory import build_provider, known_providers, provider_status
 from agentharness.skills.loader import SkillSet, load_skills
 from agentharness.state import StateManager
+from agentharness.tools.mcp_tools import make_mcp_tools
 from agentharness.tools.model_tools import list_models_tool
 from agentharness.tools.registry import ToolRegistry, build_default_registry
 from agentharness.tools.subagent_tools import spawn_subagent_tool
@@ -77,6 +81,10 @@ class Harness:
             writable=config.workspace_writable,
         )
         self.ansi = _Ansi(sys.stdout.isatty())
+        # Connect MCP servers before building the registry: their tools have to
+        # be known before the first turn advertises the tool list to the model.
+        self.mcp = McpManager(parse_servers(config))
+        self.mcp.connect_all()
         self.states = StateManager(
             self._build_provider,
             default_provider=config.provider,
@@ -93,8 +101,15 @@ class Harness:
         return build_provider(provider_name, model, self.config)
 
     def _build_base_registry(self) -> ToolRegistry:
-        """Default (state-free) tools plus the state-dependent list_models tool."""
+        """Default (state-free) tools plus the state-dependent list_models tool.
+
+        MCP tools go in here rather than in the main registry so subagents get
+        them too — they already share the workspace, and a delegated task that
+        cannot reach the same servers as its caller would be a trap.
+        """
         registry = build_default_registry(self.skillset, self.workspace, self.config)
+        for tool in make_mcp_tools(self.mcp):
+            registry.register(tool)
         registry.register(
             list_models_tool(
                 lambda: self.states.active.provider_name,
@@ -296,6 +311,25 @@ class Harness:
         self._subagent_registry = self._build_base_registry()
         self.registry = self._build_registry()
 
+    def reconnect_mcp(self, name: str) -> None:
+        """Re-establish one MCP server and rebuild the registries around it.
+
+        The registries hold wrappers bound to the tools discovered at connect,
+        so they have to be rebuilt or they would keep dispatching to a session
+        that no longer exists.
+        """
+        self.mcp.reconnect(name)
+        self._subagent_registry = self._build_base_registry()
+        self.registry = self._build_registry()
+
+    def shutdown(self) -> None:
+        """Release everything the process owns outside itself.
+
+        Today that is the MCP runtime: a loop thread plus any stdio servers we
+        spawned, which would otherwise outlive the REPL as orphans.
+        """
+        self.mcp.shutdown()
+
 
 HELP = """\
 Commands:
@@ -312,6 +346,7 @@ Commands:
   /providers                               list supported providers and whether keys are set
   /models                                  list models the active provider can reach
   /reload                                  re-scan the skills directory
+  /mcp [tools S | reconnect S | login S]   MCP servers, their tools, status, and OAuth login
   /usage [--all]                           token usage for the active state (or every state)
   /quit                                    exit
 Anything else is sent as a prompt to the active state."""
@@ -409,6 +444,97 @@ def _show_usage(h: Harness, *, all_states: bool) -> None:
                  f" = {total.total_tokens:>9,}"))
 
 
+def _describe_auth(server) -> str:
+    """How a server authenticates, named in terms of where the secret lives."""
+    if server.is_stdio:
+        return f"env: {', '.join(server.env_pass)}" if server.env_pass else ""
+    if server.auth == "oauth":
+        return "oauth"
+    if server.token_env:
+        return f"bearer: {server.token_env}"
+    return ""
+
+
+def _show_mcp(h: Harness) -> None:
+    """Print every configured MCP server, its transport, and its status."""
+    a = h.ansi
+    servers = h.mcp.servers
+    if not servers:
+        print(a.dim("  (no mcp servers configured — add an mcp_servers: block to the config)"))
+        return
+
+    width = max(len(s.name) for s in servers)
+    for server in servers:
+        if not server.enabled:
+            status, detail = a.dim("disabled"), ""
+        elif server.name in h.mcp.connected:
+            count = len(h.mcp.tools_for(server.name))
+            status, detail = a.green("connected"), f"{count} tool(s)"
+        else:
+            status, detail = a.red("failed"), "see below"
+        auth = _describe_auth(server)
+        line = f"  {server.name:<{width}}  {server.transport:<5}  {status}"
+        if detail:
+            line += f"  {detail}"
+        if auth:
+            line += a.dim(f"  ({auth})")
+        print(line)
+
+    for err in h.mcp.errors:
+        # A reason can carry a server's stderr tail; indent the continuation so
+        # it reads as one block rather than as stray output.
+        head, *rest = err.reason.splitlines() or [""]
+        print(a.red(f"  ! {err.server}: {head}"))
+        for line in rest:
+            print(a.red(f"      {line}"))
+
+
+def _show_mcp_tools(h: Harness, name: str) -> None:
+    a = h.ansi
+    if h.mcp.server(name) is None:
+        print(a.red(f"no such mcp server: {name}"))
+        return
+    tools = h.mcp.tools_for(name)
+    if not tools:
+        print(a.dim(f"  ({name} contributed no tools)"))
+        return
+    for tool in tools:
+        print(f"  {a.bold(tool.name)}: {_truncate(tool.description, 120)}")
+
+
+def _handle_mcp(h: Harness, args: list[str]) -> None:
+    a = h.ansi
+    if not args:
+        _show_mcp(h)
+    elif args[0] == "tools" and len(args) == 2:
+        _show_mcp_tools(h, args[1])
+    elif args[0] in ("reconnect", "login") and len(args) == 2:
+        name = args[1]
+        server = h.mcp.server(name)
+        if server is None:
+            print(a.red(f"no such mcp server: {name}"))
+            return
+        if args[0] == "login":
+            if server.auth != "oauth":
+                print(a.red(f"mcp server {name!r} does not use auth: oauth"))
+                return
+            # Forget the grant first, so login means "authorise again" rather
+            # than "reuse whatever is cached".
+            oauth.forget(server)
+        try:
+            h.reconnect_mcp(name)
+        except ValueError as exc:
+            print(a.red(str(exc)))
+            return
+        if name in h.mcp.connected:
+            print(a.green(f"reconnected {name}: {len(h.mcp.tools_for(name))} tool(s)"))
+        else:
+            reason = next((e.reason for e in h.mcp.errors if e.server == name), "still unavailable")
+            print(a.red(reason))
+    else:
+        print(a.red("usage: /mcp [tools <server> | reconnect <server> | login <server>]"))
+
+
 def _handle_command(h: Harness, line: str) -> bool:
     """Handle a slash command. Returns False to signal quit."""
     a = h.ansi
@@ -488,6 +614,8 @@ def _handle_command(h: Harness, line: str) -> bool:
         print(a.green(f"reloaded: {n} skill(s)"))
         if h.skillset.errors:
             print(a.red(f"  {len(h.skillset.errors)} failed to load"))
+    elif cmd == "/mcp":
+        _handle_mcp(h, rest)
     elif cmd == "/usage":
         if rest and rest[0] not in ("--all", "-a"):
             print(a.red("usage: /usage [--all]"))
@@ -508,18 +636,27 @@ def run_repl(config: Config | None = None) -> int:
                 f"skills={len(h.skillset.skills)} — /help for commands"))
     if h.skillset.errors:
         print(a.red(f"{len(h.skillset.errors)} skill(s) failed to load — see /skills"))
+    if h.mcp.connected:
+        print(a.dim(f"mcp: {len(h.mcp.connected)} server(s), {len(h.mcp.tools)} tool(s)"))
+    if h.mcp.errors:
+        print(a.red(f"{len(h.mcp.errors)} mcp server(s) unavailable — see /mcp"))
 
-    while True:
-        try:
-            line = input(a.cyan(f"[{h.states.active.name}] › ")).strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            break
-        if not line:
-            continue
-        if line.startswith("/"):
-            if not _handle_command(h, line):
+    # `finally`, not a normal exit path: an stdio server is our subprocess, and
+    # a crash on the way out must not leave it orphaned.
+    try:
+        while True:
+            try:
+                line = input(a.cyan(f"[{h.states.active.name}] › ")).strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
                 break
-        else:
-            h.run_prompt(line)
+            if not line:
+                continue
+            if line.startswith("/"):
+                if not _handle_command(h, line):
+                    break
+            else:
+                h.run_prompt(line)
+    finally:
+        h.shutdown()
     return 0

@@ -207,6 +207,54 @@ The tool description should say the listing is filtered by default and name the
 flag; a model that reads "lists the contents of a directory" and gets a filtered
 result has been misled by the schema.
 
+## MCP resources and prompts
+
+**Problem.** The MCP client implements *tools* only. The protocol has two other
+primitives, and neither has a slot in the harness today:
+
+- **Resources** — read-only data addressed by URI (`file:///specs/api.md`,
+  `db://tables/users`). The spec calls these application-controlled: an IDE
+  surfaces them in an @-mention picker and the *user* chooses what enters the
+  context. A CLI has no such picker.
+- **Prompts** — named, parameterised instruction templates the server offers,
+  meant to be invoked as slash commands by the user.
+
+**Why deferred.** Tools are what an agent loop actually exercises; the other two
+need a design decision first, not just code. Resources have no natural home
+without a picker, and prompts overlap Agent Skills — which are already a catalog
+of named instruction blobs loaded on demand — so shipping both would give the
+model two catalogs with no story about which to prefer.
+
+**Sketch of the fix.** Resources: two generic tools, `mcp_list_resources` and
+`mcp_read_resource(server, uri)`, so the *model* pulls them (the only workable
+inversion of control in a CLI). `ClientSession` already has `list_resources` and
+`read_resource`; the manager would gain a pass-through and the rendering already
+exists (`render_result` handles `EmbeddedResource`). Prompts: surface as REPL
+commands (`/mcp-prompt <server>:<name>`) that expand server-side and seed the
+next turn — never as something the model calls — and say plainly in the docs how
+they differ from skills.
+
+## stdio MCP servers inside the container
+
+**Problem.** The image is UBI10 + `python3.14` and nothing else. Most published
+MCP servers are distributed as npm or PyPI packages run via `npx` or `uvx`,
+neither of which exists in the image, so a `type: stdio` entry that works on the
+host fails in the container with a bare "No such file or directory".
+
+**Why deferred.** The fix is a policy choice about image size, not a bug. Adding
+`nodejs` + `npm` roughly doubles the image; adding `uv` is small but only covers
+Python servers. Meanwhile `type: http` works in the container today, which is
+the transport a containerised harness should probably prefer anyway — the server
+is then a separate, separately-updated process rather than a subprocess of the
+agent.
+
+**Sketch of the fix.** Either (a) document the host as the place for stdio
+servers and leave the image alone; (b) add `uv` to the Containerfile (~30 MB)
+for Python servers only; or (c) publish a second image tag with a Node runtime
+for people who need the npm ecosystem. If (b) or (c), the connect error should
+name the missing runtime rather than letting `FileNotFoundError` speak for
+itself.
+
 ## Prompt caching
 
 **Problem.** Every model call re-sends and re-pays for a large fixed prefix. Measured
@@ -269,6 +317,11 @@ right and the payback is immediate.
 4. **The workspace line is conditional** on the root existing (`effective_system`).
    Creating or removing the directory mid-session changes the system prefix. Harmless
    but worth knowing when a cache-hit rate moves for no obvious reason.
+5. **MCP tools enlarge the prefix and can change mid-session.** Their schemas come
+   from remote servers, so a configuration with several servers can dwarf the
+   built-in ~1,260 tokens of tool schemas — which makes caching *more* valuable, not
+   less. But `/mcp reconnect` rebuilds the registries, so it invalidates the whole
+   prefix exactly like `/reload`.
 
 **Verifying.** `cache_read_input_tokens` staying at zero across repeated identical
 prefixes means something is invalidating silently — that is the check to write a
