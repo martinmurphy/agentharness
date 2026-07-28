@@ -54,6 +54,17 @@ providers:
   #   base_url: https://api.together.xyz/v1
   #   api_key_env: TOGETHER_API_KEY
 
+  # Claude models through Google Vertex AI. Same Messages API, so the anthropic
+  # adapter is reused — but there is NO api key: it authenticates with Google
+  # Application Default Credentials (`gcloud auth application-default login`).
+  # Omit project_id/region to read ANTHROPIC_VERTEX_PROJECT_ID and
+  # CLOUD_ML_REGION from the environment instead. /models does not work on
+  # Vertex (it serves no Models API) — name the model above.
+  # vertex:
+  #   type: vertex
+  #   project_id: my-gcp-project
+  #   region: global
+
 # MCP servers to connect to. Each entry's tools are registered as
 # mcp__<server>__<tool> and become ordinary harness tools.
 #

@@ -201,6 +201,51 @@ that *is* set is never overridden by that placeholder, so pointing a built-in at
 a proxy still uses your real key. `/providers` shows keyless endpoints as
 `no key needed` rather than `no key`.
 
+### Claude models through Google Vertex AI
+
+`type: vertex` reaches Anthropic's models through Vertex AI. It is the same
+Messages API — same adapter, so adaptive thinking, effort, tools and signed
+thinking replay all behave identically — with a different endpoint and a
+different way of authenticating:
+
+```yaml
+provider: vertex
+model: claude-opus-4-8
+
+providers:
+  vertex:
+    type: vertex
+    project_id: my-gcp-project
+    region: global          # or a multi-region ("us", "eu") or a specific region
+```
+
+**There is no API key.** Vertex authenticates with Google Application Default
+Credentials, so `ANTHROPIC_API_KEY` is neither needed nor sent. On the host:
+
+```bash
+gcloud auth application-default login
+gcloud services enable aiplatform.googleapis.com --project my-gcp-project
+```
+
+`project_id` and `region` may both be omitted, in which case the SDK reads
+`ANTHROPIC_VERTEX_PROJECT_ID` and `CLOUD_ML_REGION` from the environment —
+useful in the container, where you can pass them through instead of mounting a
+config. Note that ADC credentials live in `~/.config/gcloud` on the host, so a
+container run needs that directory mounted or a service-account key supplied by
+whatever GCP-native means you use; `vertex` is a host-first path here for the
+same reason MCP OAuth is.
+
+Two things behave differently from the first-party API:
+
+- **`/models` does not work.** Vertex serves the Messages API but not the Models
+  API, so there is nothing to enumerate — `/models` says so rather than
+  erroring. Name the model in config. Model IDs take no prefix: current models
+  use the bare ID (`claude-opus-4-8`), and dated snapshots use an `@` separator
+  (`claude-opus-4-5@20251101`, *not* `-20251101`).
+- **`/providers` shows it as `no key needed`,** which is true of API keys but
+  says nothing about whether your Google credentials are present or valid — that
+  surfaces on the first turn. It is the same heuristic the built-ins use.
+
 ### MCP servers
 
 Tools can also come from [MCP](https://modelcontextprotocol.io) servers, which

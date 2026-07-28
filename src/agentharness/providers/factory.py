@@ -17,8 +17,20 @@ Aliases are what make a *second* endpoint of the same protocol reachable: the
 built-in ``openai`` name has exactly one ``base_url``, and a state binds to a
 provider name.
 
+One adapter type has no built-in name: ``vertex`` reaches Anthropic's models
+through Google Cloud Vertex AI, and cannot work without a project and region to
+name, so it only exists as an alias:
+
+    providers:
+      vertex:
+        type: vertex
+        project_id: my-gcp-project
+        region: global
+
 Keys are still never written in config. A built-in's SDK reads its own env var;
 an alias names the env var to read via ``api_key_env`` and we resolve it here.
+Vertex is the exception that proves the rule: it has no API key at all, and
+authenticates with Google Application Default Credentials instead.
 An endpoint with a ``base_url`` and no key resolvable either way is treated as a
 keyless local server and gets a placeholder, because the OpenAI SDK refuses to
 construct a client without one.
@@ -45,9 +57,16 @@ _ENV_VARS = {
 }
 _KNOWN = tuple(_ENV_VARS)
 
-# Adapter types an alias may declare. Same set as the built-in names, because a
-# built-in name is just the default alias for its own adapter.
-_ADAPTERS = _KNOWN
+# Adapter types an alias may declare. The built-in names, because a built-in
+# name is just the default alias for its own adapter — plus `vertex`, which is
+# the Anthropic adapter pointed at Google's endpoint. It has no built-in name
+# of its own because it cannot work without a project and region to name.
+_ADAPTERS = (*_KNOWN, "vertex")
+
+# Adapters that authenticate with something other than an API key, so the
+# key-resolution step below is skipped entirely for them. Vertex uses Google
+# Application Default Credentials.
+_KEYLESS_ADAPTERS = ("vertex",)
 
 # Sent to a keyless local server: the OpenAI SDK refuses to construct a client
 # with no key at all, and such servers ignore whatever they are given.
@@ -166,15 +185,17 @@ def build_provider(name: str, model: str, config: Config) -> Provider:
     """
     options = config.provider_options(name)
     adapter = _adapter_for(name, options, config)
-    _resolve_api_key(name, options)
+    if adapter not in _KEYLESS_ADAPTERS:
+        _resolve_api_key(name, options)
     options = {k: v for k, v in options.items() if k not in _HARNESS_KEYS}
 
-    if adapter == "anthropic":
+    if adapter in ("anthropic", "vertex"):
         return AnthropicProvider(
             model,
             effort=config.effort,
             show_thinking=config.show_thinking,
             thinking_budget=config.thinking_budget,
+            vertex=adapter == "vertex",
             **options,
         )
     if adapter == "openai":

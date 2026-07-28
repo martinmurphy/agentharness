@@ -813,3 +813,103 @@ def test_provider_status_without_config_is_builtins_only():
     from agentharness.providers.factory import provider_status
 
     assert [p.name for p in provider_status()] == ["anthropic", "openai", "gemini"]
+
+
+# ---- Vertex AI ---------------------------------------------------------------
+
+
+def _fake_vertex(monkeypatch):
+    """Capture the kwargs AnthropicVertex would be constructed with."""
+    import anthropic
+
+    captured = {}
+
+    class _Client:
+        models = None  # Vertex serves no Models API
+
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(anthropic, "AnthropicVertex", _Client)
+    return captured
+
+
+def test_vertex_alias_builds_the_anthropic_adapter_on_googles_client(monkeypatch):
+    from agentharness.providers.factory import build_provider
+
+    captured = _fake_vertex(monkeypatch)
+    cfg = _alias_config(
+        vertex={"type": "vertex", "project_id": "my-proj", "region": "global"}
+    )
+    provider = build_provider("vertex", "claude-opus-4-8", cfg)
+
+    # Same adapter — Vertex is the same Messages API behind a different endpoint.
+    assert isinstance(provider, AnthropicProvider)
+    assert provider.model == "claude-opus-4-8"
+    assert provider.vertex is True
+    assert captured == {"project_id": "my-proj", "region": "global"}
+
+
+def test_vertex_never_receives_an_api_key(monkeypatch):
+    # Credentials come from Google ADC. A stray ANTHROPIC_API_KEY in the
+    # environment must not be forwarded, and the keyless-local placeholder
+    # must not be invented either — AnthropicVertex accepts neither.
+    from agentharness.providers.factory import build_provider
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-not-be-used")
+    captured = _fake_vertex(monkeypatch)
+    cfg = _alias_config(
+        vertex={"type": "vertex", "project_id": "p", "region": "us-east5"}
+    )
+    build_provider("vertex", "m", cfg)
+    assert "api_key" not in captured
+
+
+def test_vertex_project_and_region_may_come_from_the_environment(monkeypatch):
+    # Omitted, the SDK reads ANTHROPIC_VERTEX_PROJECT_ID and CLOUD_ML_REGION.
+    from agentharness.providers.factory import build_provider
+
+    captured = _fake_vertex(monkeypatch)
+    build_provider("vertex", "m", _alias_config(vertex={"type": "vertex"}))
+    assert captured == {}
+
+
+def test_vertex_is_reported_as_a_selectable_provider(monkeypatch):
+    from agentharness.providers.factory import known_providers, provider_status
+
+    cfg = _alias_config(vertex={"type": "vertex", "project_id": "p", "region": "global"})
+    assert "vertex" in known_providers(cfg)
+    status = {p.name: p for p in provider_status(cfg)}
+    # No API key to check — readiness depends on Google ADC, which is not an
+    # env var we can inspect.
+    assert status["vertex"].keyless is True
+
+
+def test_vertex_reports_that_it_cannot_list_models():
+    # /models and the list_models tool must fail with an explanation rather
+    # than an AttributeError from the SDK client.
+    class _VertexClient:
+        models = None
+
+    provider = AnthropicProvider("m", client=_VertexClient(), vertex=True)
+    with pytest.raises(NotImplementedError, match="does not serve the Models API"):
+        provider.list_models()
+
+
+def test_vertex_uses_the_same_request_shape_as_the_first_party_api():
+    # The point of sharing the adapter: adaptive thinking, effort, tools and
+    # provider_raw replay all work identically on Vertex.
+    text = SimpleNamespace(type="text", text="hi")
+    client = FakeAnthropicClient(_anthropic_response([text]))
+    provider = AnthropicProvider("claude-opus-4-8", client=client, vertex=True)
+    provider.chat(
+        system="SYS",
+        messages=[Message(role="user", blocks=[TextBlock("hello")])],
+        tools=TOOLS,
+        max_tokens=100,
+    )
+
+    sent = client.captured
+    assert sent["model"] == "claude-opus-4-8"
+    assert sent["thinking"] == {"type": "adaptive"}
+    assert sent["output_config"] == {"effort": "high"}

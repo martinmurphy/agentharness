@@ -38,6 +38,27 @@ def _adaptive_unsupported(exc: Exception) -> bool:
     return "not supported" in msg and ("thinking" in msg or "effort" in msg)
 
 
+def _build_client(vertex: bool, options: dict[str, Any]) -> Any:
+    """Construct the SDK client for the first-party API, or for Vertex AI.
+
+    Vertex is the same Messages API behind Google's endpoint — same request
+    shape, same response shape, so the whole adapter below is shared. Only the
+    client class and how it authenticates differ: Vertex uses Google
+    Application Default Credentials, so there is no api_key to pass and no
+    ANTHROPIC_API_KEY to read. ``project_id`` and ``region`` may be omitted,
+    in which case the SDK reads ANTHROPIC_VERTEX_PROJECT_ID and CLOUD_ML_REGION.
+    """
+    import anthropic
+
+    if vertex:
+        allowed = ("project_id", "region", "base_url")
+        return anthropic.AnthropicVertex(**{k: v for k, v in options.items() if k in allowed})
+    # base_url is optional; api_key comes from ANTHROPIC_API_KEY.
+    return anthropic.Anthropic(
+        **{k: v for k, v in options.items() if k in ("base_url", "api_key")}
+    )
+
+
 class AnthropicProvider:
     name = "anthropic"
 
@@ -49,6 +70,7 @@ class AnthropicProvider:
         show_thinking: bool = False,
         thinking_budget: int | None = None,
         client: Any = None,
+        vertex: bool = False,
         **options: Any,
     ) -> None:
         self.model = model
@@ -62,12 +84,9 @@ class AnthropicProvider:
         # try them, and on that specific 400 drop them and remember it for this
         # instance so later turns skip straight to the plain request.
         self._supports_adaptive = True
+        self.vertex = vertex
         if client is None:
-            import anthropic
-
-            # base_url is optional; api_key comes from ANTHROPIC_API_KEY.
-            kwargs = {k: v for k, v in options.items() if k in ("base_url", "api_key")}
-            client = anthropic.Anthropic(**kwargs)
+            client = _build_client(vertex, options)
         self._client = client
 
     # ---- request building ---------------------------------------------------
@@ -220,4 +239,13 @@ class AnthropicProvider:
         return ProviderResponse(message=assistant, stop_reason=stop_reason, usage=usage)
 
     def list_models(self) -> list[str]:
-        return sorted(m.id for m in self._client.models.list())
+        # Vertex serves the Messages API but not the Models API, so there is
+        # nothing to enumerate there — the model has to be named in config.
+        models = getattr(self._client, "models", None)
+        if models is None:
+            raise NotImplementedError(
+                "Vertex AI does not serve the Models API; name the model in config "
+                "(see https://cloud.google.com/vertex-ai/generative-ai/docs for what "
+                "your project can reach)"
+            )
+        return sorted(m.id for m in models.list())

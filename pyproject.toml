@@ -9,7 +9,8 @@ description = "A containerised AI harness with tools, skills, and multi-state se
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-    "anthropic>=0.40",
+    # [vertex] adds google-auth, for reaching Claude models through Vertex AI.
+    "anthropic[vertex]>=0.40",
     "openai>=1.40",
     "google-genai>=1.0",
     "pyyaml>=6.0",
