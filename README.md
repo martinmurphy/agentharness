@@ -95,7 +95,7 @@ ANTHROPIC_API_KEY=sk-... .venv/bin/agentharness
 /providers                               list providers and whether their keys are set
 /models                                  list models the active provider can reach
 /reload                                  re-scan the skills directory
-/usage                                   token usage for the active state
+/usage [--all]                           token usage for the active state (or every state)
 /quit                                    exit
 ```
 

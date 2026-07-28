@@ -444,6 +444,41 @@ def test_spawn_subagent_max_iterations_restores_active(tmp_path, monkeypatch):
     assert h.states.active.name == "default"  # active restored even on failure
 
 
+# ---- usage ------------------------------------------------------------------
+
+
+def test_repl_usage_reports_active_state_only(tmp_path, monkeypatch, capsys):
+    h, repl = _harness(tmp_path, monkeypatch)
+    h.states.active.usage = Usage(input_tokens=10, output_tokens=3)
+    repl._handle_command(h, "/new other")
+    h.states.active.usage = Usage(input_tokens=100, output_tokens=7)
+    repl._handle_command(h, "/usage")
+    out = capsys.readouterr().out
+    assert "input=100 output=7 total=107" in out
+    assert "default" not in out
+
+
+def test_repl_usage_all_totals_every_state(tmp_path, monkeypatch, capsys):
+    h, repl = _harness(tmp_path, monkeypatch)
+    h.states.active.usage = Usage(input_tokens=10, output_tokens=3)
+    repl._handle_command(h, "/new other")
+    h.states.active.usage = Usage(input_tokens=1000, output_tokens=7)
+    capsys.readouterr()  # drop the /new confirmation
+    repl._handle_command(h, "/usage --all")
+    out = capsys.readouterr().out
+    assert "default" in out and "other" in out
+    assert "1,000" in out          # thousands separators
+    assert "* other" in out        # active state marked
+    assert "total" in out
+    assert "1,010" in out and "1,020" in out  # summed input and grand total
+
+
+def test_repl_usage_rejects_unknown_argument(tmp_path, monkeypatch, capsys):
+    h, repl = _harness(tmp_path, monkeypatch)
+    repl._handle_command(h, "/usage everything")
+    assert "usage: /usage [--all]" in capsys.readouterr().out
+
+
 # ---- workspace ------------------------------------------------------------
 
 

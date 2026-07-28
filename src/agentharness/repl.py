@@ -312,7 +312,7 @@ Commands:
   /providers                               list supported providers and whether keys are set
   /models                                  list models the active provider can reach
   /reload                                  re-scan the skills directory
-  /usage                                   token usage for the active state
+  /usage [--all]                           token usage for the active state (or every state)
   /quit                                    exit
 Anything else is sent as a prompt to the active state."""
 
@@ -383,6 +383,30 @@ def _list_models(h: Harness) -> None:
     for mid in models:
         mark = a.green(" *") if mid == state.model else "  "
         print(f"{mark} {mid}")
+
+
+def _show_usage(h: Harness, *, all_states: bool) -> None:
+    """Print token usage for the active state, or for every state with a total.
+
+    Usage is per-state because each state has its own history and model, so a
+    single number across all of them is only meaningful alongside the breakdown.
+    """
+    a = h.ansi
+    if not all_states:
+        u = h.states.active.usage
+        print(f"  input={u.input_tokens} output={u.output_tokens} total={u.total_tokens}")
+        return
+    states = list(h.states)
+    width = max(len(st.name) for st in states)
+    total = Usage()
+    for st in states:
+        total = total + st.usage
+        marker = "*" if st is h.states.active else " "
+        u = st.usage
+        print(f" {marker} {st.name:<{width}}  {u.input_tokens:>9,} in / {u.output_tokens:>9,} out"
+              f" = {u.total_tokens:>9,}")
+    print(a.bold(f"   {'total':<{width}}  {total.input_tokens:>9,} in / {total.output_tokens:>9,} out"
+                 f" = {total.total_tokens:>9,}"))
 
 
 def _handle_command(h: Harness, line: str) -> bool:
@@ -465,8 +489,10 @@ def _handle_command(h: Harness, line: str) -> bool:
         if h.skillset.errors:
             print(a.red(f"  {len(h.skillset.errors)} failed to load"))
     elif cmd == "/usage":
-        u = h.states.active.usage
-        print(f"  input={u.input_tokens} output={u.output_tokens} total={u.total_tokens}")
+        if rest and rest[0] not in ("--all", "-a"):
+            print(a.red("usage: /usage [--all]"))
+        else:
+            _show_usage(h, all_states=bool(rest))
     else:
         print(a.red(f"unknown command: {cmd} (try /help)"))
     return True
