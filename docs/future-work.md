@@ -143,6 +143,70 @@ advertising the workspace on the subagent path. It is evaluated *after*
 `states.new()` makes the subagent active, so a subagent inherits the workspace
 line written for the main conversation.
 
+## An ignore list for list_dir
+
+**Problem.** `list_dir(recursive=True)` reports everything. On a Python project
+that means `__pycache__/`, `*.egg-info/`, `.venv/`, and `.git/` — build output
+the model neither asked for nor can use. Measured on a real turn: a recursive
+listing of a checkout cost roughly 2,700 input tokens on the *following* call
+(tool results are resent as history), a large share of it artifacts. It also
+crowds the useful entries out of the model's attention.
+
+**Why deferred.** `list_dir` was written to be honest — it shows what is there.
+Hiding entries by default is a real behaviour change, and a naive version
+introduces a worse failure than the one it fixes (see below), so it needs the
+reporting design, not just a filter.
+
+**Sketch of the fix.** Default patterns in config, matched per path *segment*
+with `fnmatch` so `*.egg-info` works:
+
+```yaml
+workspace_ignore: ["__pycache__", "*.egg-info", ".venv", ".git", "node_modules"]
+```
+
+Prune during the walk rather than filtering the output — `rglob` will happily
+descend into a 3,000-file `.venv` and pay the I/O before anything is discarded,
+so this means a manual recursive walk in place of `Path.rglob`.
+
+Note this is a *listing* concern only. `read_file` on an explicitly named
+ignored path must keep working: the model should not be able to stumble into
+build output, but it should still be able to read a file it was told about.
+Visibility and access are separate.
+
+### From the tool's point of view
+
+The model must not need to know the ignore list in order to use the tool, so
+the argument surface stays one boolean:
+
+```
+list_dir(path=".", recursive=true)                      -> filtered (default)
+list_dir(path=".", recursive=true, include_ignored=true) -> everything
+```
+
+Rejected alternatives: an `ignore: [...]` argument (the model cannot know what
+the defaults are, so it would be overriding blind) and an `include: [...]`
+un-ignore list (same problem, more surface). A single opt-out is legible from
+the model's side and cannot be got subtly wrong.
+
+**The filtering must announce itself.** This is the part that matters, and the
+reason a naive filter is worse than none: an agent that is silently shown less
+than exists will confidently report the absence. This harness has already
+produced "your workspace is essentially empty" from a correct-but-narrow
+listing. So the result should end with something like:
+
+```
+… 412 entries hidden by ignore rules (__pycache__, *.egg-info);
+    pass include_ignored: true to see them
+```
+
+That line is cheap, it keeps the tool honest, and it hands the model the exact
+escape hatch — so a model that genuinely needs to see build output can, without
+the operator editing config.
+
+The tool description should say the listing is filtered by default and name the
+flag; a model that reads "lists the contents of a directory" and gets a filtered
+result has been misled by the schema.
+
 ## Small corrections
 
 Not deferred by design — simply not done yet:
