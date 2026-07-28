@@ -99,6 +99,13 @@ ANTHROPIC_API_KEY=sk-... .venv/bin/agentharness
 /quit                                    exit
 ```
 
+After each turn a dim line reports what that turn cost and the running session
+total — `[usage] turn 9,147 in / 61 out = 9,208 (2 calls) · session 9,208`.
+The call count is the number of model round-trips, so a turn that used tools
+shows more than one. Set `show_usage: false` to silence it; `/usage` still
+reports the total. A turn that reported no usage prints nothing, since some
+OpenAI-compatible servers omit the field.
+
 Anything not starting with `/` is a prompt to the active state. Because skills
 are mounted from the host, editing a `SKILL.md` and running `/reload` picks up
 the change without rebuilding the image.

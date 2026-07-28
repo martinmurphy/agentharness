@@ -545,3 +545,71 @@ def test_state_can_target_an_alias(tmp_path, monkeypatch):
     assert repl._handle_command(h, "/new local --provider lmstudio --model qwen3.5-9b-mlx")
     assert h.states.active.provider_name == "lmstudio"
     assert h.states.active.model == "qwen3.5-9b-mlx"
+
+
+# ---- per-turn usage ---------------------------------------------------------
+
+
+def test_turn_usage_line_after_a_single_call(tmp_path, monkeypatch, capsys):
+    h, _ = _spawn_harness(tmp_path, monkeypatch, [_text_response("hi")])
+    h.run_prompt("hello")
+    out = capsys.readouterr().out
+    assert "[usage] turn 3 in / 2 out = 5 (1 call)" in out
+    assert "session 5" in out
+
+
+def test_turn_usage_sums_tool_round_trips(tmp_path, monkeypatch, capsys):
+    """One turn, two model calls: the line reports the turn, not the last call."""
+    script = [_tool_response("c", "greet", {"name": "Ada"}), _text_response("done")]
+    h, _ = _spawn_harness(tmp_path, monkeypatch, script)
+    h.run_prompt("greet Ada")
+    out = capsys.readouterr().out
+    assert "[usage] turn 8 in / 6 out = 14 (2 calls)" in out  # (5+3) in, (4+2) out
+
+
+def test_session_total_accumulates_across_turns(tmp_path, monkeypatch, capsys):
+    h, _ = _spawn_harness(
+        tmp_path, monkeypatch, [_text_response("one"), _text_response("two")]
+    )
+    h.run_prompt("first")
+    h.run_prompt("second")
+    lines = [ln for ln in capsys.readouterr().out.splitlines() if "[usage]" in ln]
+    assert len(lines) == 2
+    assert "session 5" in lines[0]
+    assert "session 10" in lines[1]  # turn stays 5, session doubles
+
+
+def test_turn_usage_suppressed_by_config(tmp_path, monkeypatch, capsys):
+    h, _ = _spawn_harness(
+        tmp_path, monkeypatch, [_text_response("hi")], show_usage=False
+    )
+    h.run_prompt("hello")
+    assert "[usage]" not in capsys.readouterr().out
+
+
+def test_turn_usage_skipped_when_provider_reports_nothing(tmp_path, monkeypatch, capsys):
+    """Some OpenAI-compatible servers omit usage entirely; don't print zeros."""
+    h, _ = _spawn_harness(
+        tmp_path, monkeypatch, [_text_response("hi", usage=Usage(0, 0))]
+    )
+    h.run_prompt("hello")
+    assert "[usage]" not in capsys.readouterr().out
+
+
+def test_turn_usage_reported_even_when_the_turn_fails(tmp_path, monkeypatch, capsys):
+    """A turn that aborts part-way still spent what it spent."""
+    # One tool call, then the script runs out -> FakeProvider raises.
+    h, _ = _spawn_harness(tmp_path, monkeypatch, [_tool_response("c", "greet", {"name": "A"})])
+    h.run_prompt("go")
+    out = capsys.readouterr().out
+    assert "[error]" in out
+    assert "[usage] turn 5 in / 4 out = 9 (1 call)" in out
+
+
+def test_turn_usage_reported_when_max_iterations_hit(tmp_path, monkeypatch, capsys):
+    script = [_tool_response("c", "greet", {"name": "X"}) for _ in range(10)]
+    h, _ = _spawn_harness(tmp_path, monkeypatch, script, max_tool_iterations=2)
+    h.run_prompt("loop")
+    out = capsys.readouterr().out
+    assert "[stopped]" in out
+    assert "(2 calls)" in out

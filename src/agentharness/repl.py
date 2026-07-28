@@ -13,7 +13,7 @@ from pathlib import Path
 
 from agentharness import agent
 from agentharness.config import Config, load_config
-from agentharness.providers.base import Message, Provider, TextBlock
+from agentharness.providers.base import Message, Provider, TextBlock, Usage
 from agentharness.providers.factory import build_provider, known_providers, provider_status
 from agentharness.skills.loader import SkillSet, load_skills
 from agentharness.state import StateManager
@@ -223,6 +223,10 @@ class Harness:
     def run_prompt(self, text: str) -> None:
         state = self.states.active
         state.add(Message(role="user", blocks=[TextBlock(text)]))
+        # Usage arrives per model call, and one turn can make several (each tool
+        # round-trip resends the whole history), so sum them for the turn total.
+        turn = Usage()
+        calls = 0
         try:
             for event in agent.run_turn(
                 provider=state.provider,
@@ -232,11 +236,37 @@ class Harness:
                 max_tokens=self.config.max_tokens,
                 max_iterations=self.config.max_tool_iterations,
             ):
+                if isinstance(event, agent.UsageEvent):
+                    turn = turn + event.usage
+                    calls += 1
                 self._render(event)
         except agent.MaxIterationsExceeded as exc:
             print(self.ansi.red(f"[stopped] {exc}"))
         except Exception as exc:  # noqa: BLE001 - surface provider/network errors, keep REPL alive
             print(self.ansi.red(f"[error] {type(exc).__name__}: {exc}"))
+        finally:
+            # In `finally` on purpose: a turn that aborted part-way still spent
+            # everything it spent, and that is when the number matters most.
+            self._render_turn_usage(turn, calls)
+
+    def _render_turn_usage(self, turn: Usage, calls: int) -> None:
+        """One dim line per turn: what it cost, and the running session total.
+
+        Skipped when the turn reported nothing — some OpenAI-compatible servers
+        omit the usage block entirely, and a row of zeros is noise, not data.
+        """
+        if not self.config.show_usage or turn.total_tokens == 0:
+            return
+        # state.usage already includes this turn; the agent loop accumulates it.
+        session = self.states.active.usage
+        call_note = "1 call" if calls == 1 else f"{calls} calls"
+        print(
+            self.ansi.dim(
+                f"[usage] turn {turn.input_tokens:,} in / {turn.output_tokens:,} out"
+                f" = {turn.total_tokens:,} ({call_note})"
+                f"  ·  session {session.total_tokens:,}"
+            )
+        )
 
     def _render(self, event: agent.Event) -> None:
         a = self.ansi

@@ -15,6 +15,8 @@ effort: high                 # low | medium | high | xhigh | max (Anthropic only
 #                            # thinking. Unset = no thinking on those. Clamped to
 #                            # 1024 <= N < max_tokens. Ignored on current models.
 show_thinking: false         # render model reasoning (Anthropic summary / Gemini thoughts)
+show_usage: true             # one dim token line after each turn; /usage still
+                             # shows the running total either way
 max_tool_iterations: 10      # cap on tool round-trips within one turn
 skills_dir: ./skills         # inside the container this is /skills (mounted, read-only)
 workspace_dir: ./workspace   # inside the container this is /workspace (mounted, read-write)

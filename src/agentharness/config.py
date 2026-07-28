@@ -38,6 +38,8 @@ class Config:
     # models. Ignored on current models, which always use adaptive thinking.
     thinking_budget: int | None = None
     show_thinking: bool = False
+    # Print a per-turn token line after each turn (dim, one line).
+    show_usage: bool = True
     max_tool_iterations: int = 10
     skills_dir: str = "./skills"
     # Read/write scratch directory the filesystem tools are confined to. Set
@@ -76,6 +78,7 @@ _SCALAR_FIELDS: dict[str, Any] = {
     "effort": str,
     "thinking_budget": int,
     "show_thinking": _as_bool,
+    "show_usage": _as_bool,
     "max_tool_iterations": int,
     "skills_dir": str,
     "workspace_dir": str,
