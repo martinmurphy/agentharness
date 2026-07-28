@@ -10,6 +10,10 @@ dist/
 .venv/
 venv/
 config.yaml
+# Live OAuth access and refresh tokens for MCP servers. These normally live in
+# $XDG_CONFIG_HOME/agentharness/, outside the repo entirely — this is here for
+# the one case that would drag them in-tree, XDG_CONFIG_HOME pointing here.
+mcp-tokens.json
 # The workspace mount point is tracked; whatever the model puts in it is not.
 workspace/*
 !workspace/.gitkeep
