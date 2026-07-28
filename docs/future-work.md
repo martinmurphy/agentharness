@@ -207,6 +207,28 @@ The tool description should say the listing is filtered by default and name the
 flag; a model that reads "lists the contents of a directory" and gets a filtered
 result has been misled by the schema.
 
+## Migrate to the mcp 2.0 SDK
+
+**Problem.** `pyproject.toml` pins `mcp>=1.9,<2`. The 2.0 release (2026-07-28)
+renamed `McpError` to `MCPError` with no compatibility alias and changed enough
+besides that the client here does not work on it: a fresh install against 2.0.0
+fails 27 tests and errors 11 more, every stdio and HTTP connect ending in
+`MCPError: Connection closed`.
+
+**Why deferred.** The bound restores a working install immediately, which is
+what mattered — the dependency was previously unbounded, so any fresh
+`pip install -e .` on or after that date silently produced a broken harness.
+Doing the migration properly means reading 2.0's changelog for the moved
+symbols rather than chasing test failures until they pass.
+
+**Sketch of the fix.** Install 2.0 in a scratch venv, run the suite, and work
+the failures back to their imports — start with `mcp.shared.exceptions`,
+`mcp.client.stdio`, `mcp.client.streamable_http`, and `mcp.client.auth`, which
+is everything `agentharness/mcp/` imports. Then raise the bound in one commit
+with the suite green on 2.x. Note this cuts both ways: a *server* launched via
+`uvx` resolves its own `mcp` independently, so the harness and a server it
+spawns can legitimately be on different major versions.
+
 ## MCP resources and prompts
 
 **Problem.** The MCP client implements *tools* only. The protocol has two other

@@ -14,7 +14,10 @@ dependencies = [
     "openai>=1.40",
     "google-genai>=1.0",
     "pyyaml>=6.0",
-    "mcp>=1.9",
+    # Upper bound is deliberate: mcp 2.0 renamed McpError -> MCPError and moved
+    # enough else that the client here does not work on it. Raise it as part of
+    # a considered 2.0 migration, not by dropping the bound.
+    "mcp>=1.9,<2",
 ]
 
 [project.optional-dependencies]
