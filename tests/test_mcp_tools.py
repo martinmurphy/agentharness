@@ -411,3 +411,116 @@ def test_a_harness_with_no_mcp_servers_is_unaffected(tmp_path, monkeypatch):
     h = repl.Harness(Config(skills_dir=str(tmp_path), workspace_dir=str(tmp_path / "ws")))
     assert h.mcp.tools == [] and h.mcp.connected == []
     h.shutdown()  # must be safe even though no runtime ever started
+
+
+# ---- error messages ----------------------------------------------------------
+
+
+def _http_server(url: str, name: str = "remote"):
+    return parse_servers(Config(mcp_servers={name: {"type": "http", "url": url}}))[0]
+
+
+def test_a_404_is_reported_as_a_404_with_the_url():
+    # The SDK reports a 404 on the message endpoint as "Session terminated",
+    # which reads as an auth or session problem and sends you down the wrong
+    # path. It is nearly always the wrong URL — say so.
+    from agentharness.mcp.runtime import _connect_error
+
+    server = _http_server("https://mcp.example.com/v1/sse")
+    err = _connect_error(server, RuntimeError("Session terminated"))
+    text = str(err)
+    assert "404" in text
+    assert "https://mcp.example.com/v1/sse" in text
+    assert "/sse" in text  # points at the likely cause
+
+
+def test_an_http_status_error_reports_the_status_and_url():
+    from types import SimpleNamespace
+
+    from agentharness.mcp.runtime import _connect_error
+
+    server = _http_server("https://mcp.example.com/mcp")
+    exc = RuntimeError("Client error '401 Unauthorized'")
+    exc.response = SimpleNamespace(status_code=401)
+    assert "HTTP 401 from https://mcp.example.com/mcp" in str(_connect_error(server, exc))
+
+
+def test_a_connection_failure_names_the_host_it_could_not_reach():
+    # errno-style messages name a syscall, never the endpoint.
+    from agentharness.mcp.runtime import _connect_error
+
+    server = _http_server("https://mcp.internal.example/mcp")
+    err = _connect_error(server, OSError("[Errno 8] nodename nor servname provided"))
+    assert "mcp.internal.example" in str(err)
+
+
+def test_a_stdio_failure_is_left_alone():
+    # stdio errors already carry the server's stderr tail; a URL would be a lie.
+    from agentharness.mcp.runtime import _connect_error
+
+    server = parse_servers(Config(mcp_servers={"fs": {"type": "stdio", "command": "x"}}))[0]
+    text = str(_connect_error(server, FileNotFoundError("no such file: x")))
+    assert "no such file: x" in text
+    assert "http" not in text.lower()
+
+
+def test_a_turn_failure_names_the_provider_and_endpoint(tmp_path, monkeypatch, capsys):
+    # "APIConnectionError: Connection error." alone does not say which of the
+    # configured providers failed, or what host it could not reach.
+    class _Exploding:
+        name = "fake"
+
+        def chat(self, **_kwargs):
+            raise RuntimeError("Connection error.")
+
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: _Exploding())
+    cfg = Config(
+        skills_dir=str(tmp_path),
+        workspace_dir=str(tmp_path / "ws"),
+        provider="modelscorp",
+        model="Qwen/Qwen3-14B",
+        providers={"modelscorp": {"type": "openai", "base_url": "https://qwen.internal/v1"}},
+    )
+    h = repl.Harness(cfg)
+    try:
+        h.run_prompt("who are you")
+        out = capsys.readouterr().out
+        assert "RuntimeError: Connection error." in out
+        assert "modelscorp" in out
+        assert "https://qwen.internal/v1" in out
+        assert "Qwen/Qwen3-14B" in out
+    finally:
+        h.shutdown()
+
+
+def test_a_turn_failure_surfaces_the_underlying_cause(tmp_path, monkeypatch, capsys):
+    # An SDK's "Connection error." is the same sentence for DNS failure, a
+    # refused port and an untrusted certificate. The chain says which.
+    class _Exploding:
+        name = "fake"
+
+        def chat(self, **_kwargs):
+            try:
+                raise OSError("[SSL: CERTIFICATE_VERIFY_FAILED] unable to get local issuer")
+            except OSError as inner:
+                raise RuntimeError("Connection error.") from inner
+
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: _Exploding())
+    h = repl.Harness(Config(skills_dir=str(tmp_path), workspace_dir=str(tmp_path / "ws")))
+    try:
+        h.run_prompt("hello")
+        out = capsys.readouterr().out
+        assert "Connection error." in out
+        assert "CERTIFICATE_VERIFY_FAILED" in out  # the part that names the fix
+    finally:
+        h.shutdown()
+
+
+def test_root_cause_survives_a_reraise_cycle():
+    from agentharness.repl import _root_cause
+
+    a = ValueError("a")
+    b = ValueError("b")
+    a.__context__ = b
+    b.__context__ = a  # a cycle; must terminate
+    assert _root_cause(a) is b

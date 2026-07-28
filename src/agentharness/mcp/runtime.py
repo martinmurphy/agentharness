@@ -87,6 +87,37 @@ def _leaves(exc: BaseException) -> list[BaseException]:
     return [exc]
 
 
+# What the SDK reports when a POST to the message endpoint comes back 404
+# (mcp/client/streamable_http.py — it is the only thing that raises this). The
+# string says nothing about a status code or a URL, which makes the single most
+# common misconfiguration look like a session problem, so translate it.
+_SESSION_TERMINATED = "session terminated"
+
+
+def _describe(cause: BaseException, server: McpServerConfig) -> str:
+    """Say what failed in terms of the endpoint, not just the exception type.
+
+    An SDK message like "Session terminated" or "Connection error" is accurate
+    and useless: it names neither the status nor the host. For an HTTP server
+    the URL is the thing being diagnosed, so it goes in the message.
+    """
+    status = getattr(getattr(cause, "response", None), "status_code", None)
+    if status is not None:
+        return f"HTTP {status} from {server.url or 'the server'}"
+
+    text = f"{type(cause).__name__}: {cause}"
+    if server.is_stdio:
+        return text
+    if _SESSION_TERMINATED in str(cause).lower():
+        return (
+            f"{text} — which is how the SDK reports HTTP 404 from {server.url}. "
+            f"Check the path: this client speaks streamable HTTP, so a legacy "
+            f"'/sse' endpoint answers the auth challenge and then 404s."
+        )
+    # A connection failure names an errno, never the host it was aimed at.
+    return text if server.url in text else f"{text} ({server.url})"
+
+
 def _connect_error(server: McpServerConfig, exc: BaseException) -> McpConnectionError:
     """Turn whatever a failed connect raised into one attributable message."""
     leaves = _leaves(exc)
@@ -95,9 +126,7 @@ def _connect_error(server: McpServerConfig, exc: BaseException) -> McpConnection
             f"mcp server {server.name!r} did not respond within {server.handshake_timeout:g}s"
         )
     cause = leaves[0] if leaves else exc
-    return McpConnectionError(
-        f"mcp server {server.name!r}: {type(cause).__name__}: {cause}"
-    )
+    return McpConnectionError(f"mcp server {server.name!r}: {_describe(cause, server)}")
 
 
 async def _list_all_tools(session: ClientSession) -> list[types.Tool]:

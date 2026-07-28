@@ -72,6 +72,22 @@ def _truncate(text: str, limit: int = 300) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _root_cause(exc: BaseException) -> BaseException:
+    """The innermost exception in a chain — the one that says what went wrong.
+
+    Walks ``__cause__`` then ``__context__``, guarding against the cycles a
+    re-raise inside an except block can create.
+    """
+    seen = {id(exc)}
+    current = exc
+    while True:
+        nxt = current.__cause__ or current.__context__
+        if nxt is None or id(nxt) in seen:
+            return current
+        seen.add(id(nxt))
+        current = nxt
+
+
 class Harness:
     def __init__(self, config: Config) -> None:
         self.config = config
@@ -258,11 +274,32 @@ class Harness:
         except agent.MaxIterationsExceeded as exc:
             print(self.ansi.red(f"[stopped] {exc}"))
         except Exception as exc:  # noqa: BLE001 - surface provider/network errors, keep REPL alive
-            print(self.ansi.red(f"[error] {type(exc).__name__}: {exc}"))
+            print(self.ansi.red(f"[error] {self._describe_error(state, exc)}"))
         finally:
             # In `finally` on purpose: a turn that aborted part-way still spent
             # everything it spent, and that is when the number matters most.
             self._render_turn_usage(turn, calls)
+
+    def _describe_error(self, state, exc: Exception) -> str:
+        """Name the endpoint a failed turn was aimed at.
+
+        An SDK's "Connection error." says which *kind* of failure happened and
+        nothing about where — and with several providers configured, where is
+        most of the diagnosis. The provider name and its base_url are what
+        distinguish "the internal endpoint needs the VPN" from "the local
+        server isn't running".
+        """
+        detail = f"{type(exc).__name__}: {exc}"
+        # SDKs flatten transport failures into one opaque sentence — the OpenAI
+        # SDK's "Connection error." is the same string for a DNS failure, a
+        # refused port, and an untrusted certificate. The chain underneath says
+        # which, and that is the whole diagnosis.
+        root = _root_cause(exc)
+        if root is not exc:
+            detail += f" — {type(root).__name__}: {_truncate(str(root), 200)}"
+        base_url = self.config.provider_options(state.provider_name).get("base_url")
+        where = f"{state.provider_name} → {base_url}" if base_url else state.provider_name
+        return f"{detail}  [{where}, model {state.model}]"
 
     def _render_turn_usage(self, turn: Usage, calls: int) -> None:
         """One dim line per turn: what it cost, and the running session total.
