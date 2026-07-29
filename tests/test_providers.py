@@ -913,3 +913,65 @@ def test_vertex_uses_the_same_request_shape_as_the_first_party_api():
     assert sent["model"] == "claude-opus-4-8"
     assert sent["thinking"] == {"type": "adaptive"}
     assert sent["output_config"] == {"effort": "high"}
+
+
+# ---- an alias's default model ------------------------------------------------
+
+
+def test_alias_model_does_not_reach_the_sdk(monkeypatch):
+    """`model:` is a harness key: the adapter takes the model positionally."""
+    from agentharness.providers.factory import build_provider
+
+    captured = _fake_openai(monkeypatch)
+    cfg = _alias_config(
+        llama={
+            "type": "openai",
+            "base_url": "http://localhost:1/v1",
+            "model": "meta-llama/Llama-3.3-70B-Instruct",
+        }
+    )
+    provider = build_provider("llama", "meta-llama/Llama-3.3-70B-Instruct", cfg)
+
+    assert provider.model == "meta-llama/Llama-3.3-70B-Instruct"
+    assert "model" not in captured
+
+
+def test_resolve_model_prefers_an_explicit_request():
+    from agentharness.providers.factory import resolve_model
+
+    cfg = _alias_config(llama={"type": "openai", "model": "alias-default"})
+    assert resolve_model("llama", "asked-for", cfg) == "asked-for"
+
+
+def test_resolve_model_falls_back_to_the_alias_default():
+    from agentharness.providers.factory import resolve_model
+
+    cfg = _alias_config(llama={"type": "openai", "model": "alias-default"})
+    assert resolve_model("llama", None, cfg) == "alias-default"
+
+
+def test_alias_default_model_beats_the_top_level_model():
+    """Config.model has a non-None default, so it is the fallback, not a choice."""
+    from agentharness.config import Config
+    from agentharness.providers.factory import resolve_model
+
+    cfg = Config(model="top-level", providers={"llama": {"type": "openai", "model": "alias"}})
+    assert resolve_model("llama", None, cfg) == "alias"
+
+
+def test_resolve_model_falls_back_to_the_top_level_model():
+    from agentharness.config import Config
+    from agentharness.providers.factory import resolve_model
+
+    cfg = Config(model="top-level", providers={"plain": {"type": "openai"}})
+    assert resolve_model("plain", None, cfg) == "top-level"
+    assert resolve_model("anthropic", None, cfg) == "top-level"
+
+
+def test_provider_status_reports_the_alias_default_model():
+    from agentharness.providers.factory import provider_status
+
+    cfg = _alias_config(llama={"type": "openai", "model": "alias-default"})
+    status = {p.name: p for p in provider_status(cfg)}
+    assert status["llama"].default_model == "alias-default"
+    assert status["anthropic"].default_model == ""

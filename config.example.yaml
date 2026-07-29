@@ -54,6 +54,15 @@ providers:
   #   base_url: https://api.together.xyz/v1
   #   api_key_env: TOGETHER_API_KEY
 
+  # An endpoint serving exactly one model: declare it, and `--provider llama-70b`
+  # is enough — no need to repeat the model. A provider's own `model:` beats the
+  # top-level one above, which is the fallback for providers that declare none.
+  # llama-70b:
+  #   type: openai
+  #   base_url: https://llama-70b.corp.example/v1
+  #   api_key_env: LLAMA70B_API_KEY
+  #   model: meta-llama/Llama-3.3-70B-Instruct
+
   # Claude models through Google Vertex AI. Same Messages API, so the anthropic
   # adapter is reused — but there is NO api key: it authenticates with Google
   # Application Default Credentials (`gcloud auth application-default login`).

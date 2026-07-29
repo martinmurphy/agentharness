@@ -17,7 +17,12 @@ from agentharness.mcp import oauth
 from agentharness.mcp.config import parse_servers
 from agentharness.mcp.manager import McpManager
 from agentharness.providers.base import Message, Provider, TextBlock, Usage
-from agentharness.providers.factory import build_provider, known_providers, provider_status
+from agentharness.providers.factory import (
+    build_provider,
+    known_providers,
+    provider_status,
+    resolve_model,
+)
 from agentharness.skills.loader import SkillSet, load_skills
 from agentharness.state import StateManager
 from agentharness.tools.mcp_tools import make_mcp_tools
@@ -104,7 +109,7 @@ class Harness:
         self.states = StateManager(
             self._build_provider,
             default_provider=config.provider,
-            default_model=config.model,
+            default_model_for=self._default_model_for,
             default_system=config.system_prompt,
         )
         self._subagent_counter = 0
@@ -115,6 +120,10 @@ class Harness:
 
     def _build_provider(self, provider_name: str, model: str) -> Provider:
         return build_provider(provider_name, model, self.config)
+
+    def _default_model_for(self, provider_name: str) -> str:
+        """The model a new state on this provider gets when none was named."""
+        return resolve_model(provider_name, None, self.config)
 
     def _build_base_registry(self) -> ToolRegistry:
         """Default (state-free) tools plus the state-dependent list_models tool.
@@ -197,7 +206,15 @@ class Harness:
         caller = self.states.active
         caller_name = caller.name
         provider_name = provider or caller.provider_name
-        model_name = model or caller.model
+        # Inheriting the caller's model only makes sense on the caller's own
+        # provider: a model name means nothing to a backend that has never heard
+        # of it, so a delegation that changes provider resolves afresh.
+        if model:
+            model_name = model
+        elif provider_name != caller.provider_name:
+            model_name = self._default_model_for(provider_name)
+        else:
+            model_name = caller.model
 
         self._subagent_counter += 1
         name = f"subagent-{self._subagent_counter}"
@@ -410,7 +427,10 @@ def _list_providers(h: Harness) -> None:
         )
         mark = a.green(" *") if p.name == active else "  "
         suffix = "  (active)" if p.name == active else ""
-        print(f"{mark} {p.name:10} {p.env_var:20} {avail}{suffix}")
+        # A provider that serves one model names it, so `/new x --provider p`
+        # is enough — the listing has to show what that would select.
+        model = f"  {a.dim(p.default_model)}" if p.default_model else ""
+        print(f"{mark} {p.name:10} {p.env_var:20} {avail}{suffix}{model}")
 
 
 def _show_workspace(h: Harness) -> None:
@@ -669,7 +689,9 @@ def run_repl(config: Config | None = None) -> int:
     a = h.ansi
 
     print(a.bold("agentharness"))
-    print(a.dim(f"provider={config.provider} model={config.model} "
+    # The active state's model, not config.model: a provider may declare its own,
+    # and a banner that named the wrong one would be worse than none.
+    print(a.dim(f"provider={config.provider} model={h.states.active.model} "
                 f"skills={len(h.skillset.skills)} — /help for commands"))
     if h.skillset.errors:
         print(a.red(f"{len(h.skillset.errors)} skill(s) failed to load — see /skills"))

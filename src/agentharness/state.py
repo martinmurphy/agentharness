@@ -18,6 +18,12 @@ from agentharness.providers.base import Message, Provider, Usage
 # Builds a provider bound to (provider_name, model).
 ProviderBuilder = Callable[[str, str], Provider]
 
+# The model a state on a given provider should bind to when none was asked for.
+# Injected rather than imported: a provider may declare its own default model,
+# which is a config concern, and this module deliberately knows only the neutral
+# provider protocol.
+ModelResolver = Callable[[str], str]
+
 
 @dataclass
 class ConversationState:
@@ -55,12 +61,12 @@ class StateManager:
         provider_builder: ProviderBuilder,
         *,
         default_provider: str,
-        default_model: str,
+        default_model_for: ModelResolver,
         default_system: str,
     ) -> None:
         self._build = provider_builder
         self._default_provider = default_provider
-        self._default_model = default_model
+        self._default_model_for = default_model_for
         self._default_system = default_system
         self._states: dict[str, ConversationState] = {}
         self._active: str | None = None
@@ -79,7 +85,9 @@ class StateManager:
         if name in self._states:
             raise ValueError(f"state {name!r} already exists")
         provider_name = provider or self._default_provider
-        model_name = model or self._default_model
+        # Resolved against the chosen provider, not globally: switching provider
+        # without naming a model must not carry the old provider's model over.
+        model_name = model or self._default_model_for(provider_name)
         state = ConversationState(
             name=name,
             provider_name=provider_name,

@@ -73,7 +73,9 @@ _KEYLESS_ADAPTERS = ("vertex",)
 _PLACEHOLDER_KEY = "not-needed"
 
 # Config keys the harness consumes itself rather than passing to an adapter.
-_HARNESS_KEYS = ("type", "api_key_env")
+# ``model`` is one of these: adapters take the model positionally, so leaving it
+# in would be `TypeError: got multiple values for argument 'model'`.
+_HARNESS_KEYS = ("type", "api_key_env", "model")
 
 
 @dataclass(frozen=True)
@@ -81,6 +83,7 @@ class ProviderInfo:
     name: str
     env_var: str  # "" when the provider needs no key (keyless local endpoint)
     available: bool  # ready to use: its key is set, or it needs none
+    default_model: str = ""  # the block's own `model:`, "" when it declares none
 
     @property
     def keyless(self) -> bool:
@@ -111,7 +114,12 @@ def provider_status(config: Config | None = None) -> list[ProviderInfo]:
     keyless ones are always available.
     """
     infos = [
-        ProviderInfo(name=n, env_var=v, available=bool(os.environ.get(v)))
+        ProviderInfo(
+            name=n,
+            env_var=v,
+            available=bool(os.environ.get(v)),
+            default_model=default_model(n, config),
+        )
         for n, v in _ENV_VARS.items()
     ]
     for name, block in _aliases(config).items():
@@ -121,9 +129,36 @@ def provider_status(config: Config | None = None) -> list[ProviderInfo]:
                 name=name,
                 env_var=env_var,
                 available=bool(os.environ.get(env_var)) if env_var else True,
+                default_model=default_model(name, config),
             )
         )
     return infos
+
+
+def default_model(name: str, config: Config | None) -> str:
+    """The model a provider block declares for itself, or "" if it declares none."""
+    if config is None:
+        return ""
+    block = config.providers.get(name)
+    if not isinstance(block, dict):
+        return ""
+    declared = block.get("model")
+    return declared if isinstance(declared, str) and declared else ""
+
+
+def resolve_model(name: str, requested: str | None, config: Config) -> str:
+    """The model a state bound to provider ``name`` should use.
+
+    Precedence: an explicit request, then the provider's own ``model:``, then
+    the top-level ``model:``.
+
+    The provider's key beats the top-level one because ``Config.model`` has a
+    non-None default — "did the user set this explicitly?" is not answerable
+    without a sentinel — so the top-level key is the fallback for providers that
+    declare nothing, not a competing choice. This is what lets an alias serving
+    exactly one model be selected by name alone, without repeating the model.
+    """
+    return requested or default_model(name, config) or config.model
 
 
 def known_providers(config: Config | None = None) -> list[str]:

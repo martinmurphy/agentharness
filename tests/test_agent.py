@@ -63,7 +63,7 @@ def _manager(provider: FakeProvider) -> StateManager:
     return StateManager(
         lambda name, model: provider,
         default_provider="fake",
-        default_model="fake-1",
+        default_model_for=lambda _provider: "fake-1",
         default_system="SYS",
     )
 
@@ -404,6 +404,19 @@ def test_spawn_subagent_defaults_to_caller_provider_and_model(tmp_path, monkeypa
     assert sub.model == "claude-opus-4-8"
 
 
+def test_spawn_subagent_does_not_carry_the_model_across_providers(tmp_path, monkeypatch):
+    """A model name means nothing to a provider that has never heard of it."""
+    h, _ = _spawn_harness(
+        tmp_path, monkeypatch, [_text_response("ok")],
+        provider="anthropic", model="claude-opus-4-8",
+        providers={"llama": {"type": "openai", "model": "llama-3.3-70b"}},
+    )
+    h._spawn_subagent("task", "llama", None)
+    sub = next(s for s in h.states if s.name.startswith("subagent-"))
+    assert sub.provider_name == "llama"
+    assert sub.model == "llama-3.3-70b"
+
+
 def test_spawn_subagent_explicit_provider_and_model(tmp_path, monkeypatch):
     h, _ = _spawn_harness(tmp_path, monkeypatch, [_text_response("ok")])
     h._spawn_subagent("task", "gemini", "gemini-3.5-flash")
@@ -567,6 +580,61 @@ def test_repl_providers_lists_aliases(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "lmstudio" in out and "no key needed" in out
     assert "together" in out and "TOGETHER_API_KEY" in out
+
+
+# ---- an alias that declares its own model ------------------------------------
+
+LLAMA = "meta-llama/Llama-3.3-70B-Instruct"
+
+
+def _model_alias_harness(tmp_path, monkeypatch, **cfg):
+    """A harness whose 'llama' alias serves exactly one model."""
+    from agentharness import repl
+
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: FakeProvider([]))
+    return repl.Harness(
+        Config(
+            skills_dir=str(tmp_path),
+            workspace_dir=str(_ws(tmp_path).root),
+            providers={
+                "llama": {
+                    "type": "openai",
+                    "base_url": "http://localhost:1/v1",
+                    "model": LLAMA,
+                }
+            },
+            **cfg,
+        )
+    ), repl
+
+
+def test_repl_new_with_alias_needs_no_model_flag(tmp_path, monkeypatch):
+    h, repl = _model_alias_harness(tmp_path, monkeypatch)
+    repl._handle_command(h, "/new work --provider llama")
+    assert h.states.active.model == LLAMA
+
+
+def test_repl_new_explicit_model_still_wins_over_alias_default(tmp_path, monkeypatch):
+    h, repl = _model_alias_harness(tmp_path, monkeypatch)
+    repl._handle_command(h, "/new work --provider llama --model something-else")
+    assert h.states.active.model == "something-else"
+
+
+def test_default_state_uses_the_alias_model(tmp_path, monkeypatch):
+    h, _ = _model_alias_harness(tmp_path, monkeypatch, provider="llama")
+    assert h.states.active.model == LLAMA
+
+
+def test_provider_without_a_declared_model_uses_the_top_level_one(tmp_path, monkeypatch):
+    h, repl = _model_alias_harness(tmp_path, monkeypatch, model="top-level")
+    repl._handle_command(h, "/new plain --provider anthropic")
+    assert h.states.active.model == "top-level"
+
+
+def test_repl_providers_shows_the_alias_default_model(tmp_path, monkeypatch, capsys):
+    h, repl = _model_alias_harness(tmp_path, monkeypatch)
+    repl._handle_command(h, "/providers")
+    assert LLAMA in capsys.readouterr().out
 
 
 def test_spawn_subagent_enum_includes_aliases(tmp_path, monkeypatch):

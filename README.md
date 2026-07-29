@@ -181,6 +181,34 @@ Aliases are ordinary provider names everywhere: `/new local --provider lmstudio
 --model qwen3.5-9b-mlx`, `/providers`, `/models`, and `spawn_subagent`'s
 provider list all pick them up.
 
+An endpoint that serves exactly one model can say so, and then naming the
+provider is enough:
+
+```yaml
+providers:
+  llama-70b:
+    type: openai
+    base_url: https://llama-70b.corp.example/v1
+    api_key_env: LLAMA70B_API_KEY
+    model: meta-llama/Llama-3.3-70B-Instruct
+```
+
+```
+/new work --provider llama-70b          # binds to the model above
+```
+
+A model is resolved in three steps: an explicit `--model`, then the provider's
+own `model:`, then the top-level `model:`. **The provider's key beats the
+top-level one**, which is the fallback for providers that declare nothing rather
+than a competing choice — the top-level `model:` has a default value, so
+"was it set deliberately?" is not a question the config can answer. `/providers`
+shows each provider's declared model so it is clear what a bare `--provider`
+would select.
+
+The same resolution applies to delegation: `spawn_subagent` carries the caller's
+model over only when it stays on the caller's provider, since a model name means
+nothing to a backend that has never heard of it.
+
 **Keys still never live in the config.** A built-in's SDK reads its own env var;
 an alias names the variable with `api_key_env` and the harness resolves it at
 construction. If that variable is unset you get a clear error naming it, not a
