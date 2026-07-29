@@ -426,10 +426,3 @@ and needs wrapping. If both blocks get the key, the resolver belongs in a shared
 
 `verify: false` should be visibly unsafe — marked in `/providers` and `/mcp`, not
 merely accepted.
-
-## Small corrections
-
-Not deferred by design — simply not done yet:
-
-- The README's "Providers" bullet still describes three backends and doesn't
-  mention that `providers:` is now a registry of aliases.

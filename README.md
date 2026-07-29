@@ -32,9 +32,13 @@ model.
   path is confined to it.
 - **Multiple states** — independent in-memory conversations, each with its own
   history, system prompt, provider, and model.
-- **Providers** — Anthropic, Google Gemini (AI Studio), and any
-  OpenAI-compatible endpoint (OpenAI, Ollama, vLLM, …); the abstraction is
-  built so the next backend is another adapter, not a refactor.
+- **Providers** — Anthropic, the same models through Google Vertex AI, Google
+  Gemini (AI Studio), and any OpenAI-compatible endpoint (OpenAI, Ollama, vLLM,
+  …). `providers:` is a registry rather than a fixed list of names: a *second*
+  endpoint speaking a protocol the harness already has is an alias in
+  configuration — its own `base_url`, key variable, and the model it serves —
+  not code. A genuinely new protocol is another adapter, not a refactor. See
+  *Provider aliases*.
 
 ## Quick start (container)
 
