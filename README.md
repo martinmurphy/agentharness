@@ -201,6 +201,53 @@ that *is* set is never overridden by that placeholder, so pointing a built-in at
 a proxy still uses your real key. `/providers` shows keyless endpoints as
 `no key needed` rather than `no key`.
 
+### Endpoints with a private or self-signed certificate
+
+A model served from a private endpoint often presents a certificate signed by an
+internal CA, or a self-signed one. Nothing in the harness configures TLS trust —
+it is set process-wide with `SSL_CERT_FILE`, which every consumer here honours:
+the Anthropic, OpenAI and Gemini SDKs (through `httpx`), the HTTP MCP transport,
+and `web_fetch` (through stdlib `urllib`).
+
+**The trap is that `SSL_CERT_FILE` *replaces* the trust store rather than adding
+to it.** Point it at a file containing only your internal CA and every public
+endpoint stops verifying — a remote MCP server, `web_fetch`, and the hosted model
+APIs all fail at once, which does not look like a certificate problem when it
+happens.
+
+So the bundle has to contain the public roots too. `certifi` ships them (it is
+already installed as an `httpx` dependency), so build a combined file:
+
+```bash
+.venv/bin/python -c "import certifi; print(certifi.where())"   # where the public roots live
+
+cat corp-ca.pem "$(.venv/bin/python -c 'import certifi; print(certifi.where())')" > bundle.pem
+export SSL_CERT_FILE="$PWD/bundle.pem"
+```
+
+Use the interpreter the harness runs on — `certifi` arrives as an `httpx`
+dependency, so it is in the virtualenv and usually not in the system `python3`.
+Concatenated PEM files are a valid bundle, and order does not matter. Rebuild it
+after upgrading `certifi`, or the roots in it go stale.
+
+A **self-signed** endpoint — one with no CA behind it — works the same way: add
+the server's own certificate to the bundle, since a self-signed certificate is
+its own issuer. Verification still checks the hostname, so a certificate whose
+subject alternative name does not cover the name in your `base_url` will be
+rejected however you configure trust; reissue it with the right SAN. Skipping
+verification for one endpoint is not currently possible — see
+[`docs/future-work.md`](docs/future-work.md), which sketches per-provider and
+per-server `verify` options.
+
+In the container, mount the bundle and pass the variable:
+
+```bash
+podman run --rm -it \
+  -e ANTHROPIC_API_KEY -e SSL_CERT_FILE=/certs/bundle.pem \
+  -v "$PWD/bundle.pem:/certs/bundle.pem:ro,Z" \
+  -v "$PWD/skills:/skills:ro,Z" agentharness
+```
+
 ### Claude models through Google Vertex AI
 
 `type: vertex` reaches Anthropic's models through Vertex AI. It is the same

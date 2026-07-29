@@ -349,6 +349,84 @@ right and the payback is immediate.
 prefixes means something is invalidating silently — that is the check to write a
 test around, not the mere presence of a `cache_control` key.
 
+## Per-endpoint TLS trust (`verify` on providers and MCP servers) — low priority
+
+**Problem.** TLS trust is process-global. An endpoint with a private CA or a
+self-signed certificate is configured with `SSL_CERT_FILE`, which applies to
+every consumer in the process — the three provider SDKs, the HTTP MCP transport,
+and `web_fetch` — whether or not they need it. Two consequences:
+
+- The variable *replaces* the trust store rather than adding to it (see
+  `httpx/_config.py`, and stdlib `ssl.create_default_context()` behaves the same
+  way), so a bundle that omits the public roots silently breaks every public
+  endpoint at once. The README documents the combined-bundle fix.
+- There is no way to relax verification for **one** endpoint. A self-signed
+  certificate whose SAN does not match the configured `base_url` cannot be
+  trusted by any bundle, and the only alternative is disabling verification
+  everywhere, which nothing here offers on purpose.
+
+**Why deferred — and why low priority.** The zero-code option works in every case
+that matters: concatenate the private CA (or the self-signed leaf) with certifi's
+roots and point `SSL_CERT_FILE` at the result. That covers private CAs,
+self-signed endpoints, and mixed public/private setups, for providers and MCP
+servers alike. What a `verify` key would add over it is scoping and ergonomics,
+not capability — the one genuine capability gap is the mismatched-SAN case, whose
+real fix is reissuing the certificate.
+
+**Sketch of the fix.** One key, the same vocabulary in both blocks:
+
+| Value | Meaning | Passed to httpx |
+|---|---|---|
+| absent, or `true` | Default trust; still honours `SSL_CERT_FILE` | `True` |
+| `/path/ca.pem` | Trust exactly that PEM — a private CA, or a pinned self-signed leaf | `ssl.create_default_context(cafile=…)` |
+| `/path/certs/` | Trust that directory | `ssl.create_default_context(capath=…)` |
+| `false` | No verification at all | `False` |
+
+```yaml
+providers:
+  scratch:
+    type: openai
+    base_url: https://gpu-box.lan:8000/v1
+    verify: false                        # self-signed, wrong SAN
+
+mcp_servers:
+  internal:
+    type: http
+    url: https://mcp.corp.example/mcp
+    verify: /etc/pki/corp-ca.pem
+```
+
+*Providers.* Resolve the config value to `True | False | ssl.SSLContext` in
+`factory.py` and hand that neutral value to the adapter, which maps it to its own
+SDK — the same neutral-value / per-adapter-mapping split the rest of `providers/`
+uses, and necessary because the SDKs do not agree on the hook. All three adapters
+already take a `client=` injection kwarg, so tests need no network.
+
+| Adapter | Hook |
+|---|---|
+| `openai` | `openai.OpenAI(http_client=httpx.Client(verify=v))` |
+| `anthropic`, `vertex` | `Anthropic(http_client=…)` / `AnthropicVertex(http_client=…)` |
+| `gemini` | `genai.Client(http_options=HttpOptions(client_args={"verify": v}, async_client_args={"verify": v}))` — set both, since either client may be constructed |
+
+`verify` must join `_HARNESS_KEYS` in `factory.py`, or it becomes a stray kwarg:
+provider blocks are splatted into adapter constructors.
+
+*MCP servers.* Simpler — `mcp/runtime.py` already builds the `httpx.AsyncClient`
+itself and passes it to the transport, so this is one `verify=` argument. OAuth
+comes along for free: `oauth.build_auth` returns an `httpx.Auth` attached to that
+same client, so discovery, dynamic registration and token exchange inherit the
+setting.
+
+*Both.* Validate the value's structure at config load, but check the file at
+connect — the rule `mcp/config.py` already documents for credentials, so a bad
+path takes down one endpoint with a message naming it rather than the whole REPL.
+`ssl.create_default_context(cafile=<missing>)` raises a bare `FileNotFoundError`
+and needs wrapping. If both blocks get the key, the resolver belongs in a shared
+`agentharness/tls.py`; with only one, leave it where it is used.
+
+`verify: false` should be visibly unsafe — marked in `/providers` and `/mcp`, not
+merely accepted.
+
 ## Small corrections
 
 Not deferred by design — simply not done yet:
