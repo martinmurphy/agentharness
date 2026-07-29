@@ -111,7 +111,7 @@ alternative. Half-working would be worse than an honest boundary.
 
 ## Verification
 
-`make test` (272 tests) and `make lint`. No test touches the network — stdio servers
+`make test` and `make lint`. No test touches the network — stdio servers
 are local fixture scripts, HTTP and OAuth servers are `FastMCP` + Starlette on
 ephemeral localhost ports.
 

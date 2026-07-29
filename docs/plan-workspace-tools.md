@@ -129,7 +129,7 @@ it is usually unnecessary on macOS, where the podman VM's virtiofs handles owner
 ## Verification
 
 ```bash
-.venv/bin/pytest -q          # 115 -> 165, no network, no API key
+.venv/bin/pytest -q          # no network, no API key
 .venv/bin/ruff check .
 
 printf '/workspace\n/tools\n/quit\n' | .venv/bin/agentharness
@@ -150,5 +150,5 @@ the system-prompt line).
 
 ## Status: implemented
 
-165 tests pass, ruff clean, the image builds, and a file written inside the container is
+The suite passes, ruff clean, the image builds, and a file written inside the container is
 present and host-owned afterwards.

@@ -109,7 +109,7 @@ helper and `_list_models` command pattern (`repl.py`).
 ## Verification
 
 ```bash
-.venv/bin/python -m pytest -q          # existing 73 + new tests, no network
+.venv/bin/python -m pytest -q          # existing + new tests, no network
 .venv/bin/ruff check .
 ```
 
@@ -156,5 +156,5 @@ Then rebuild the image (`podman build -t agentharness .`) and commit.
 ## Status: implemented
 
 Shipped in commit `7c15442` ("Add provider-listing: list_providers tool + /providers command").
-All items above landed as planned; 78 tests pass, ruff clean, and the image rebuilds with both
+All items above landed as planned; the suite passes, ruff clean, and the image rebuilds with both
 surfaces working.

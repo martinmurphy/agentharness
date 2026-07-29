@@ -431,7 +431,5 @@ merely accepted.
 
 Not deferred by design — simply not done yet:
 
-- `docs/plan-workspace-tools.md` pins stale test counts (`115 -> 165`, "165 tests
-  pass") at lines 132 and 153. Either update or reword so no number is pinned.
 - The README's "Providers" bullet still describes three backends and doesn't
   mention that `providers:` is now a registry of aliases.

@@ -79,7 +79,7 @@ python3 -m venv .venv
 .venv/bin/agentharness --list-skills     # no API key needed
 ANTHROPIC_API_KEY=sk-... .venv/bin/agentharness
 
-.venv/bin/pytest -q                      # 184 tests, no network
+.venv/bin/pytest -q                      # no network, no API key
 .venv/bin/ruff check .
 ```
 
