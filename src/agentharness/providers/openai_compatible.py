@@ -131,8 +131,25 @@ class OpenAICompatibleProvider:
                 args = {}
             blocks.append(ToolCall(id=tc.id, name=fn.name, arguments=args))
 
-        # Reconstruct the wire assistant message for lossless replay.
-        raw_wire: dict[str, Any] = {"role": "assistant", "content": content}
+        # The assistant turn is replayed from this dict, so it has to keep
+        # fields this adapter knows nothing about. Gemini 3.x behind an
+        # OpenAI-compatible endpoint is the case in point: it returns a
+        # thought_signature alongside each function call and rejects a replayed
+        # call that has lost it ("Function call is missing a thought_signature
+        # in functionCall parts"). The SDK's models allow extra fields, so
+        # dumping one preserves whatever the server sent; naming the fields by
+        # hand silently drops the rest, which is the bug this replaced.
+        dump = getattr(raw_message, "model_dump", None)
+        if dump is not None:
+            raw_wire: dict[str, Any] = dump(exclude_none=True)
+            # A tool-call-only turn has always gone out with an explicit null
+            # rather than no content key; keep that wire shape.
+            raw_wire.setdefault("content", None)
+            return blocks, raw_wire
+
+        # A client that is not an SDK model (a test double, an injected stub)
+        # has no extras to preserve, so the fields we know are all there is.
+        raw_wire = {"role": "assistant", "content": content}
         if tool_calls:
             raw_wire["tool_calls"] = [
                 {

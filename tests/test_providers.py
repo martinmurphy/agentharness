@@ -975,3 +975,77 @@ def test_provider_status_reports_the_alias_default_model():
     status = {p.name: p for p in provider_status(cfg)}
     assert status["llama"].default_model == "alias-default"
     assert status["anthropic"].default_model == ""
+
+
+# ---- provider-specific extras survive replay ---------------------------------
+
+
+def _sdk_message_with_signature(sig="SIG-ABC123"):
+    """A real SDK message carrying Gemini's thought signature on the tool call.
+
+    Gemini 3.x rejects a replayed function call whose thought_signature is
+    missing, so the adapter has to carry through fields it knows nothing about.
+    A SimpleNamespace double cannot show this: only the real model keeps unknown
+    fields (pydantic `extra="allow"`).
+    """
+    from openai.types.chat import ChatCompletionMessage
+
+    return ChatCompletionMessage.model_validate(
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "read_skill", "arguments": '{"name": "demo"}'},
+                    "extra_content": {"google": {"thought_signature": sig}},
+                }
+            ],
+        }
+    )
+
+
+def test_openai_unknown_tool_call_fields_survive_replay():
+    message = _sdk_message_with_signature()
+    response = SimpleNamespace(
+        choices=[SimpleNamespace(message=message, finish_reason="tool_calls")],
+        usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3),
+    )
+    client = FakeOpenAIClient(response)
+    provider = OpenAICompatibleProvider("gemini-3.5-flash", client=client)
+
+    first = provider.chat(system="SYS", messages=[], tools=TOOLS, max_tokens=10)
+
+    # Replay that assistant turn plus its tool result, as the agent loop does.
+    provider.chat(
+        system="SYS",
+        messages=[
+            Message(role="user", blocks=[TextBlock("hi")]),
+            first.message,
+            Message(role="tool", blocks=[ToolResult(call_id="call_1", content="ok")]),
+        ],
+        tools=TOOLS,
+        max_tokens=10,
+    )
+
+    replayed = next(m for m in client.captured["messages"] if m.get("role") == "assistant")
+    assert replayed["tool_calls"][0]["extra_content"] == {
+        "google": {"thought_signature": "SIG-ABC123"}
+    }
+
+
+def test_openai_replay_still_sends_an_explicit_null_content():
+    """A tool-call-only turn kept `content: None` before; do not change the wire."""
+    response = SimpleNamespace(
+        choices=[
+            SimpleNamespace(message=_sdk_message_with_signature(), finish_reason="tool_calls")
+        ],
+        usage=SimpleNamespace(prompt_tokens=1, completion_tokens=1),
+    )
+    client = FakeOpenAIClient(response)
+    provider = OpenAICompatibleProvider("m", client=client)
+    first = provider.chat(system="", messages=[], tools=TOOLS, max_tokens=10)
+
+    assert first.message.provider_raw["content"] is None
+    assert first.message.tool_calls()[0].arguments == {"name": "demo"}
