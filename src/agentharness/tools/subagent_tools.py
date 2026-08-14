@@ -12,7 +12,10 @@ per-*message*: ``agent.run_turn`` runs the calls one assistant message carries
 on a pool, so a model that spawns four subagents across four messages gets four
 sequential round-trips no matter what ``max_concurrency`` is set to. There is no
 API parameter that asks for batching — only one that forbids it — so the
-description is the whole lever.
+description is the whole lever. Observed working: with the sentence in place, a
+turn asked to consult four backends emitted all four calls in one message and
+they came back out of call order. Without it, the same prompt produced one call
+per message. Reword with that in mind.
 """
 
 from __future__ import annotations

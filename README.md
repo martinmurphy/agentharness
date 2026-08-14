@@ -167,10 +167,29 @@ same way every time.
 The "one message" part is the model's choice, not the harness's. A model that
 issues four `spawn_subagent` calls across four messages gets four sequential
 round-trips whatever `max_concurrency` says, because each message only ever
-carried one call — no provider API has a knob that asks for batching. The
-`spawn_subagent` description tells the model to put independent tasks in one
-message; the `(N calls)` count on the `[usage]` line is how you check it did.
-Four subagents batched is 2 calls; spawned one at a time it is 5.
+carried one call — no provider API has a knob that asks for batching, only one
+that forbids it. The `spawn_subagent` description tells the model to put
+independent tasks in one message.
+
+To check that it did, read the *shape* of the output rather than counting
+anything. Batched looks like this — the `→` lines grouped, then results coming
+back in whatever order they finish, which is the part a sequential run cannot
+fake:
+
+```
+→ spawn_subagent(model='claude-opus-5')
+→ spawn_subagent(model='claude-haiku-4-5-20251001')
+→ spawn_subagent(model='gemini-3.5-flash')
+→ spawn_subagent(model='gpt-oss-120b')
+[subagent-1] created …
+[subagent-2] created …
+← result: …          # subagent-4 first: it was simply quickest
+```
+
+Unbatched puts each `→` line with its own result before the next `→` appears.
+The `(N calls)` count on the `[usage]` line is a weaker signal than it looks:
+a batched turn that retries — a wrong model name, say — makes extra round-trips
+too, so a high count does not by itself mean the calls ran in sequence.
 
 ## Configuration
 

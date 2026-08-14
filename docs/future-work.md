@@ -144,35 +144,34 @@ building a prompt for (subagents are no longer activated), but it still appends
 the workspace paragraph for every state, so a subagent inherits the line written
 for the main conversation.
 
-## Unverified: does the tool description get the model to batch its spawns?
+## Model names are guessed before they are looked up
 
-**Problem.** Parallel tool dispatch is per-*message*: `agent.run_turn` runs the
-calls one assistant message carries on a pool. A model that spawns four
-subagents across four messages therefore gets four sequential round-trips, and
-`max_concurrency` never applies — there is never more than one call to run.
+**Problem.** Asked to consult four named backends, the model spawned four
+subagents on model IDs it had invented — `claude-opus-4`, `claude-haiku`,
+`gemini-2.0-flash`, `llama-3.1-70b`. All four 404'd. It then called
+`list_models(provider='all')`, corrected itself, and re-spawned. The turn cost
+an extra round trip and four dead subagent states (`/states` keeps them), and
+one of the *corrected* names 404'd too — `gemini-2.5-flash` is listed but "no
+longer available to new users", so listing a model does not prove it is usable.
 
-Observed on the first real run of the feature. Asked to put one question to
-four backends, the model emitted one `spawn_subagent` per message: five model
-calls instead of two, each subagent finishing before the next was created. The
-concurrency machinery was working correctly and had nothing to do.
+`spawn_subagent` takes `model` as a free-text string, which is the only thing it
+can be: the reachable set depends on the provider, the key, and the account, and
+is not knowable at schema-build time. `provider` is an enum and was always right;
+`model` is prose and was always wrong.
 
-There is no request parameter that asks a provider for batching — Anthropic
-offers only `disable_parallel_tool_use`, which forbids it — so the tool
-description is the only lever. `spawn_subagent`'s now says that independent
-tasks belong in one message and run concurrently there.
+**Why deferred.** The cheap fix is another description sentence — call
+`list_models` first when naming a model you have not confirmed — which is the
+same lever that fixed batching, and unverifiable the same way. Better but more
+work: have the spawn failure path recognise a not-found error and say so in the
+result (*"model X is not available on provider Y; call list_models"*), turning a
+dead end into a recovery hint rather than relying on the model to think of it.
+Best and most expensive: cache each provider's model list at connect time and
+validate before spawning, which trades a startup call per provider for the
+guarantee — and still cannot catch the "listed but not available to you" case
+above.
 
-**Why open.** It is a prompt change, and like the entry above it only a real run
-against a real provider tells you. `tests/test_tools.py` pins the wording so a
-reword cannot silently drop the affordance, but no test can show that a model
-acts on it — a fake provider replays whatever script the test wrote.
-
-**If it doesn't hold.** Escalating levers, narrowest first: a sentence in
-`DEFAULT_SYSTEM_PROMPT` about batching independent tool calls generally (helps
-`web_fetch` and MCP tools too, not just spawns); then reporting the shape back
-to the user, since the failure is currently invisible unless you count the
-`(N calls)` on the usage line — a dim note when a turn made several
-single-call round-trips in a row would name it. Forcing it in the harness is not
-an option: the model decides what one message contains.
+Not a concurrency bug: the four failures stayed isolated to their own subagents
+and came back as ordinary tool results, which is what should happen.
 
 ## An ignore list for list_dir
 
