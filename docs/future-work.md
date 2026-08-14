@@ -139,9 +139,65 @@ observed working.
 what should stop is the unrelated file and provider poking.
 
 **If it doesn't hold.** The structural fix is to stop `effective_system()` from
-advertising the workspace on the subagent path. It is evaluated *after*
-`states.new()` makes the subagent active, so a subagent inherits the workspace
-line written for the main conversation.
+advertising the workspace on the subagent path. It now takes the state it is
+building a prompt for (subagents are no longer activated), but it still appends
+the workspace paragraph for every state, so a subagent inherits the line written
+for the main conversation.
+
+## Model names are guessed before they are looked up
+
+**Problem.** Asked to consult four named backends, the model spawned four
+subagents on model IDs it had invented — `claude-opus-4`, `claude-haiku`,
+`gemini-2.0-flash`, `llama-3.1-70b`. All four 404'd. It then called
+`list_models(provider='all')`, corrected itself, and re-spawned. The turn cost
+an extra round trip and four dead subagent states (`/states` keeps them), and
+one of the *corrected* names 404'd too — `gemini-2.5-flash` is listed but "no
+longer available to new users", so listing a model does not prove it is usable.
+
+`spawn_subagent` takes `model` as a free-text string, which is the only thing it
+can be: the reachable set depends on the provider, the key, and the account, and
+is not knowable at schema-build time. `provider` is an enum and was always right;
+`model` is prose and was always wrong.
+
+**Partly addressed.** The failure path classifies a not-found error
+(`providers.base.is_model_not_found`) and returns the names that *would* have
+worked, fetched once per provider and cached, plus the caveat that a listed
+name failing the same way is not served to this account — the
+`gemini-2.5-flash` case.
+
+Quoting the list is the second iteration. The first only *named* the call to
+make (*"call list_models(provider='Y')"*), and a real run showed why that was
+not enough: the model already called `list_models` unprompted, both with the
+hint and without it, so the advice changed nothing — same five model calls,
+same nine subagent states, same recovery. Advice a caller was going to follow
+anyway buys nothing; the round trip is the cost, so the fix has to remove the
+round trip. It also rules out the cheaper option of a description sentence
+telling the model to look names up first: on the run that prompted this, the
+model was given `claude-opus-5` verbatim in the user's prompt and spawned
+`claude-opus-4-1` anyway. It is not failing to follow instructions about
+lookups; it is confabulating IDs it was handed correctly.
+
+Measured across three runs of the same prompt: 5 model calls and 9 subagent
+states with no hint, the same 5 and 9 when the hint only named `list_models`,
+then 4 and 8 once the names themselves came back — the separate lookup round
+trip disappears, which is the whole of the saving.
+
+**What is still open.** Recovery, not prevention: the caller spends one failed
+batch and a set of dead subagent states before the names reach it. Closing that
+means validating before spawning, which needs each provider's list fetched at
+startup — a call per provider, on a REPL that currently starts without touching
+the network and runs with no key set — and would *still* miss the
+listed-but-not-served case, since only the call reveals it. A real startup cost
+for a partial guarantee, which is why it is here rather than done.
+
+The residual round trip in that 4 is the same Gemini case: offered a list, the
+model picked `gemini-2.5-flash` from it, which 404s. Nothing available at that
+moment could have known — the name had not failed yet, and the provider lists
+it. Filtering rejections only helps the *second* time, which is what it now
+does.
+
+Not a concurrency bug: the failures stayed isolated to their own subagents and
+came back as ordinary tool results, which is what should happen.
 
 ## An ignore list for list_dir
 

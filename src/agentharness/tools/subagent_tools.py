@@ -5,6 +5,17 @@ its own tool + skill loop until it produces an answer, which is returned to the
 caller as the tool result. It is a stateful tool (it needs the harness to create
 states and drive the loop), so the harness builds it with a ``runner`` closure —
 see ``Harness._spawn_subagent`` in ``repl.py``.
+
+The description tells the model to batch independent spawns into one message,
+and that is load-bearing rather than advice. Concurrency in the harness is
+per-*message*: ``agent.run_turn`` runs the calls one assistant message carries
+on a pool, so a model that spawns four subagents across four messages gets four
+sequential round-trips no matter what ``max_concurrency`` is set to. There is no
+API parameter that asks for batching — only one that forbids it — so the
+description is the whole lever. Observed working: with the sentence in place, a
+turn asked to consult four backends emitted all four calls in one message and
+they came back out of call order. Without it, the same prompt produced one call
+per message. Reword with that in mind.
 """
 
 from __future__ import annotations
@@ -33,7 +44,12 @@ def spawn_subagent_tool(runner: SubagentRunner, providers: list[str]) -> Tool:
             "loop until it produces an answer, then returns that answer to you. "
             "By default the subagent uses the same provider and model as you; "
             "optionally set 'provider' and/or 'model' to run it on a different "
-            "backend. Use this to isolate a subtask or get a second model's take."
+            "backend. Use this to isolate a subtask or get a second model's take. "
+            "When the subtasks do not depend on each other — the same question put "
+            "to several models, or several unrelated pieces of work — put all the "
+            "calls in one message: they run concurrently, so the batch costs the "
+            "slowest one instead of the sum. Sending them one message at a time "
+            "runs them in sequence for no benefit."
         ),
         input_schema={
             "type": "object",

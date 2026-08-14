@@ -71,6 +71,33 @@ def test_workspace_defaults(monkeypatch, tmp_path):
     assert cfg.workspace_writable is True  # writes are on by default
 
 
+def test_concurrency_defaults(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AGENTHARNESS_CONFIG", raising=False)
+    monkeypatch.delenv("AGENTHARNESS_MAX_CONCURRENCY", raising=False)
+    monkeypatch.delenv("AGENTHARNESS_MAX_JOBS", raising=False)
+    cfg = load_config()
+    assert cfg.max_concurrency == 8
+    assert cfg.max_jobs == 4
+
+
+def test_concurrency_from_yaml_and_env(monkeypatch, tmp_path):
+    path = tmp_path / "c.yaml"
+    path.write_text("max_concurrency: 2\nmax_jobs: 1\n", encoding="utf-8")
+    monkeypatch.setenv("AGENTHARNESS_CONFIG", str(path))
+    monkeypatch.delenv("AGENTHARNESS_MAX_CONCURRENCY", raising=False)
+    monkeypatch.delenv("AGENTHARNESS_MAX_JOBS", raising=False)
+    cfg = load_config()
+    assert cfg.max_concurrency == 2
+    assert cfg.max_jobs == 1
+
+    monkeypatch.setenv("AGENTHARNESS_MAX_CONCURRENCY", "16")
+    monkeypatch.setenv("AGENTHARNESS_MAX_JOBS", "3")
+    cfg = load_config()
+    assert cfg.max_concurrency == 16  # env overrides the file, and coerces to int
+    assert cfg.max_jobs == 3
+
+
 def test_workspace_from_yaml_and_env(monkeypatch, tmp_path):
     path = tmp_path / "c.yaml"
     path.write_text("workspace_dir: /data\nworkspace_writable: false\n", encoding="utf-8")

@@ -41,6 +41,11 @@ class Config:
     # Print a per-turn token line after each turn (dim, one line).
     show_usage: bool = True
     max_tool_iterations: int = 10
+    # Tool calls from one assistant message that may run at once. 1 is the old
+    # sequential behaviour.
+    max_concurrency: int = 8
+    # Turns that may run in the background (a prompt ending in `&`) at once.
+    max_jobs: int = 4
     skills_dir: str = "./skills"
     # Read/write scratch directory the filesystem tools are confined to. Set
     # workspace_writable false to register only the read tools.
@@ -84,6 +89,8 @@ _SCALAR_FIELDS: dict[str, Any] = {
     "show_thinking": _as_bool,
     "show_usage": _as_bool,
     "max_tool_iterations": int,
+    "max_concurrency": int,
+    "max_jobs": int,
     "skills_dir": str,
     "workspace_dir": str,
     "workspace_writable": _as_bool,

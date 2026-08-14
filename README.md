@@ -32,6 +32,10 @@ model.
   path is confined to it.
 - **Multiple states** — independent in-memory conversations, each with its own
   history, system prompt, provider, and model.
+- **Parallel work** — tool calls the model puts in *one* message run
+  concurrently, so four `spawn_subagent` calls in one message cost one round
+  trip rather than four; and a prompt ending in ` &` runs in the background,
+  leaving the prompt free for another state. See *Background jobs*.
 - **Providers** — Anthropic, the same models through Google Vertex AI, Google
   Gemini (AI Studio), and any OpenAI-compatible endpoint (OpenAI, Ollama, vLLM,
   …). `providers:` is a registry rather than a fixed list of names: a *second*
@@ -105,6 +109,8 @@ ANTHROPIC_API_KEY=sk-... .venv/bin/agentharness
 /reload                                  re-scan the skills directory
 /mcp [tools S | reconnect S | login S]   MCP servers, their tools, status, and OAuth login
 /usage [--all]                           token usage for the active state (or every state)
+/jobs                                    list background jobs
+/job <id>                                replay a background job's output
 /quit                                    exit
 ```
 
@@ -125,6 +131,65 @@ Each state can target a different backend:
 /new research --provider openai --model gpt-4o
 /new gem      --provider gemini --model gemini-3.5-flash
 ```
+
+### Background jobs
+
+A prompt ending in a standalone ` &` runs in the background and hands the prompt
+straight back:
+
+```
+[default] › summarise the workspace &
+[job 1] started on default
+[default] › /jobs
+    1  running  default     12s  summarise the workspace
+[default] › /new scratch
+[scratch] › what is 2+2                 # works while job 1 runs
+[scratch] › /job 1                      # the job's output, replayed in full
+```
+
+Backgrounding is always explicit — a slow turn never takes the terminal away on
+its own. A job's output is buffered rather than printed, because a job writing
+while you are typing would scribble over the line readline owns; only a one-line
+completion notice reaches the terminal, and it waits for the next prompt.
+
+**One in-flight turn per state.** A second prompt on a busy state is refused
+rather than queued: two turns appending to one history interleave into a
+transcript neither of them wrote. Concurrency comes from using more states —
+`/switch` or `/new`. `/delete` and `/reset` are refused on a busy state for the
+same reason. `max_jobs` (default 4) caps how many run at once.
+
+Within a single turn, tool calls the model puts in **one message** run
+concurrently, up to `max_concurrency` (default 8); set it to `1` for the old
+sequential dispatch. Results are *rendered* as they land, so you can see
+progress, but recorded in the model's call order, so the transcript replays the
+same way every time.
+
+The "one message" part is the model's choice, not the harness's. A model that
+issues four `spawn_subagent` calls across four messages gets four sequential
+round-trips whatever `max_concurrency` says, because each message only ever
+carried one call — no provider API has a knob that asks for batching, only one
+that forbids it. The `spawn_subagent` description tells the model to put
+independent tasks in one message.
+
+To check that it did, read the *shape* of the output rather than counting
+anything. Batched looks like this — the `→` lines grouped, then results coming
+back in whatever order they finish, which is the part a sequential run cannot
+fake:
+
+```
+→ spawn_subagent(model='claude-opus-5')
+→ spawn_subagent(model='claude-haiku-4-5-20251001')
+→ spawn_subagent(model='gemini-3.5-flash')
+→ spawn_subagent(model='gpt-oss-120b')
+[subagent-1] created …
+[subagent-2] created …
+← result: …          # subagent-4 first: it was simply quickest
+```
+
+Unbatched puts each `→` line with its own result before the next `→` appears.
+The `(N calls)` count on the `[usage]` line is a weaker signal than it looks:
+a batched turn that retries — a wrong model name, say — makes extra round-trips
+too, so a high count does not by itself mean the calls ran in sequence.
 
 ## Configuration
 
@@ -472,6 +537,8 @@ src/agentharness/
   config.py            Config dataclass; YAML + env resolution
   repl.py              REPL loop and slash commands
   agent.py             provider-neutral agent loop (yields events)
+  context.py           the running turn: its state and its output sink
+  jobs.py              background turns: Job + JobRunner
   state.py             ConversationState + StateManager (in-memory)
   workspace.py         workspace root + confined filesystem operations
   skills/              Skill model, discovery, validation, catalog
