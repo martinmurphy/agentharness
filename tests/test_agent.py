@@ -820,6 +820,53 @@ def test_an_unrelated_subagent_failure_gets_no_hint(tmp_path, monkeypatch):
     assert "list_models" not in answer
 
 
+def _served(answer: str) -> str:
+    """Just the suggested names — not the raw detail the message ends with,
+    which quotes the failing ID and would match any search for it."""
+    return answer.split("It serves:")[1].split("Spawn again")[0]
+
+
+def test_the_failing_model_is_not_offered_back(tmp_path, monkeypatch):
+    """"X is unavailable; it serves … X" is the message contradicting itself.
+
+    Gemini lists names it refuses to new accounts, so the model that just 404'd
+    is routinely still in the listing it came from.
+    """
+    exc = _not_found(
+        "404 NOT_FOUND. models/gemini-2.5-flash is no longer available", attr="code"
+    )
+    h = _failing_spawn_harness(
+        tmp_path, monkeypatch, exc, models=["gemini-2.5-flash", "gemini-flash-latest"]
+    )
+    answer = h._spawn_subagent("q", "gemini", "gemini-2.5-flash")
+    assert "gemini-flash-latest" in _served(answer)
+    assert "gemini-2.5-flash" not in _served(answer)
+
+
+def test_a_name_that_failed_once_is_not_offered_again(tmp_path, monkeypatch):
+    """The listing cannot be trusted, so the session remembers what it learned."""
+    exc = _not_found(
+        "404 NOT_FOUND. models/gemini-2.5-flash is no longer available", attr="code"
+    )
+    h = _failing_spawn_harness(
+        tmp_path, monkeypatch, exc, models=["gemini-2.5-flash", "gemini-flash-latest"]
+    )
+    h._spawn_subagent("q", "gemini", "gemini-2.5-flash")
+    # A later failure on the same provider must not suggest the known-bad name.
+    answer = h._spawn_subagent("q", "gemini", "gemini-whatever")
+    assert "gemini-flash-latest" in _served(answer)
+    assert "gemini-2.5-flash" not in _served(answer)
+
+
+def test_the_hint_degrades_when_every_listed_name_is_known_bad(tmp_path, monkeypatch):
+    """Nothing left to suggest — say so the plain way rather than "It serves: "."""
+    exc = _not_found("404 not_found_error model: only-one", attr="code")
+    h = _failing_spawn_harness(tmp_path, monkeypatch, exc, models=["only-one"])
+    answer = h._spawn_subagent("q", "gemini", "only-one")
+    assert "It serves:" not in answer
+    assert "list_models(provider='gemini')" in answer
+
+
 def test_a_long_model_list_is_capped(tmp_path, monkeypatch):
     """A provider serving hundreds must not paste all of them into the context."""
     from agentharness import repl

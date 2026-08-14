@@ -190,6 +190,9 @@ class Harness:
         # Cached because a batch of spawns on bad names fails several times at
         # once, usually on the same provider.
         self._model_lists: dict[str, Future[list[str] | None]] = {}
+        # provider name -> model IDs observed to be rejected, so a name that has
+        # already failed is never suggested. Guarded by the same lock.
+        self._rejected_models: dict[str, set[str]] = {}
         self._model_list_lock = threading.Lock()
         # Serialises whole lines onto the terminal. Foreground output is the
         # only thing that reaches it — jobs render into their own buffers — but
@@ -276,8 +279,8 @@ class Harness:
             raise ValueError(f"provider {provider_name!r} cannot list models")
         return lister()
 
-    def _models_for_failure(self, provider_name: str) -> list[str] | None:
-        """That provider's model IDs for a failure message, or None if unknown.
+    def _models_for_failure(self, provider_name: str, failed: str) -> list[str] | None:
+        """Names worth suggesting after ``failed`` was rejected, or None.
 
         Never raises and never lists twice for the same provider. Both matter
         because of where it is called from: an except block, on a pool worker,
@@ -290,8 +293,19 @@ class Harness:
         arrive owns the fetch, the rest wait on its result, and no thread holds
         a lock while the network is slow. A failed listing is cached as None so
         an unreachable provider is asked once, not once per failure.
+
+        Every name known to have been rejected is filtered out, ``failed``
+        included. A listing is not a promise: Gemini serves one containing
+        models it then refuses to newer accounts, so the name that just 404'd is
+        routinely still in the list it came from, and quoting it back would make
+        the message contradict itself. What the session has actually observed
+        beats what the provider claims, so a rejection is remembered for the
+        rest of the session. None when nothing survives the filter — there is
+        no suggestion left to make, and the generic wording is honest.
         """
         with self._model_list_lock:
+            rejected = self._rejected_models.setdefault(provider_name, set())
+            rejected.add(failed)
             pending = self._model_lists.get(provider_name)
             fetch = pending is None
             if fetch:
@@ -308,9 +322,14 @@ class Harness:
                 # on a result that will never be set.
                 pending.set_result(models)
         try:
-            return pending.result(timeout=_MODEL_LIST_TIMEOUT)
+            models = pending.result(timeout=_MODEL_LIST_TIMEOUT)
         except Exception:  # noqa: BLE001 - the hint degrades; the failure still reports
             return None
+        if not models:
+            return None
+        with self._model_list_lock:
+            rejected = set(self._rejected_models.get(provider_name, ()))
+        return [m for m in models if m not in rejected] or None
 
     def effective_system(self, state: ConversationState) -> str:
         """The named state's base prompt plus the skills catalog and workspace.
@@ -413,7 +432,9 @@ class Harness:
             # connection error is not a naming problem, and asking the same
             # unreachable endpoint for its catalogue would just fail again.
             models = (
-                self._models_for_failure(provider_name) if is_model_not_found(exc) else None
+                self._models_for_failure(provider_name, model_name)
+                if is_model_not_found(exc)
+                else None
             )
             return _subagent_failure(provider_name, model_name, exc, models)
 

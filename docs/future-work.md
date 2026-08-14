@@ -177,6 +177,11 @@ model was given `claude-opus-5` verbatim in the user's prompt and spawned
 `claude-opus-4-1` anyway. It is not failing to follow instructions about
 lookups; it is confabulating IDs it was handed correctly.
 
+Measured across three runs of the same prompt: 5 model calls and 9 subagent
+states with no hint, the same 5 and 9 when the hint only named `list_models`,
+then 4 and 8 once the names themselves came back — the separate lookup round
+trip disappears, which is the whole of the saving.
+
 **What is still open.** Recovery, not prevention: the caller spends one failed
 batch and a set of dead subagent states before the names reach it. Closing that
 means validating before spawning, which needs each provider's list fetched at
@@ -184,6 +189,12 @@ startup — a call per provider, on a REPL that currently starts without touchin
 the network and runs with no key set — and would *still* miss the
 listed-but-not-served case, since only the call reveals it. A real startup cost
 for a partial guarantee, which is why it is here rather than done.
+
+The residual round trip in that 4 is the same Gemini case: offered a list, the
+model picked `gemini-2.5-flash` from it, which 404s. Nothing available at that
+moment could have known — the name had not failed yet, and the provider lists
+it. Filtering rejections only helps the *second* time, which is what it now
+does.
 
 Not a concurrency bug: the failures stayed isolated to their own subagents and
 came back as ordinary tool results, which is what should happen.
