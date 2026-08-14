@@ -13,6 +13,7 @@ import shlex
 import sys
 import threading
 import time
+from concurrent.futures import Future
 from pathlib import Path
 
 from agentharness import agent, context
@@ -88,14 +89,33 @@ def _truncate(text: str, limit: int = 300) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _subagent_failure(provider_name: str, model_name: str, exc: Exception) -> str:
+# How many model IDs a failure message quotes before summarising the rest. The
+# names go into the caller's context, and a provider serving hundreds would cost
+# more there than the round trip this saves.
+_MAX_LISTED_MODELS = 50
+
+
+def _subagent_failure(
+    provider_name: str, model_name: str, exc: Exception, models: list[str] | None = None
+) -> str:
     """What the *calling model* is told when a subagent could not run.
 
     This string is the only channel back into that model's context, so it is
     where a recoverable failure has to say how to recover. A raw SDK 404 states
     what broke and leaves the next move to be inferred — and the caller that
     just invented a model ID is not the one to trust with that inference. The
-    original detail is kept either way; the hint is added, never substituted.
+    original detail is kept in every case; the hint is added, never substituted.
+
+    When ``models`` is known it is quoted outright rather than the caller being
+    sent to fetch it. Telling it to call ``list_models`` costs a whole round
+    trip and still depends on it taking the advice; the names were one call away
+    at the point of failure, so they ride back with the error and the next
+    message can spawn correctly. The fallback wording is for a provider that
+    cannot list, has no key, or could not be reached.
+
+    The "listed but not available" caveat belongs in *both* variants: Gemini
+    serves a list containing names it then refuses to new accounts, so quoting
+    the list without the caveat just invites the same name back.
 
     ``_describe_error`` is this function's opposite number on the foreground
     path: same job, aimed at the person at the terminal instead.
@@ -103,12 +123,26 @@ def _subagent_failure(provider_name: str, model_name: str, exc: Exception) -> st
     detail = f"{type(exc).__name__}: {exc}"
     if not is_model_not_found(exc):
         return f"Subagent failed: {detail}"
-    return (
+
+    head = (
         f"Subagent failed: model {model_name!r} is not available on provider "
-        f"{provider_name!r}. Call list_models(provider={provider_name!r}) for the "
-        f"names it serves, then spawn again with one of those. If a name from "
-        f"that list fails the same way, it is listed but not available to this "
-        f"account — choose a different one rather than retrying it. ({detail})"
+        f"{provider_name!r}. "
+    )
+    if models:
+        shown = ", ".join(models[:_MAX_LISTED_MODELS])
+        extra = len(models) - _MAX_LISTED_MODELS
+        if extra > 0:
+            shown += f", … and {extra} more (list_models(provider={provider_name!r}) for all)"
+        next_step = f"It serves: {shown}. Spawn again with one of those. "
+    else:
+        next_step = (
+            f"Call list_models(provider={provider_name!r}) for the names it "
+            f"serves, then spawn again with one of those. "
+        )
+    return (
+        f"{head}{next_step}If one of them fails this same way it is listed but "
+        f"not available to this account — choose a different one rather than "
+        f"retrying it. ({detail})"
     )
 
 
@@ -152,6 +186,11 @@ class Harness:
         # StateManager.new, which is the only race-free arbiter of a name.
         self._subagent_counter = itertools.count(1)
         self.jobs = JobRunner(max_jobs=config.max_jobs)
+        # provider name -> a Future holding its model IDs, for failure messages.
+        # Cached because a batch of spawns on bad names fails several times at
+        # once, usually on the same provider.
+        self._model_lists: dict[str, Future[list[str] | None]] = {}
+        self._model_list_lock = threading.Lock()
         # Serialises whole lines onto the terminal. Foreground output is the
         # only thing that reaches it — jobs render into their own buffers — but
         # a foreground turn's parallel subagents all log through here.
@@ -236,6 +275,42 @@ class Harness:
         if lister is None:
             raise ValueError(f"provider {provider_name!r} cannot list models")
         return lister()
+
+    def _models_for_failure(self, provider_name: str) -> list[str] | None:
+        """That provider's model IDs for a failure message, or None if unknown.
+
+        Never raises and never lists twice for the same provider. Both matter
+        because of where it is called from: an except block, on a pool worker,
+        with three siblings failing beside it — a batch of spawns on invented
+        names is exactly the shape that produces several failures on one
+        provider at once, and each one asking the network the same question
+        would be the cost this is meant to save.
+
+        A Future rather than a lock held across the call: the first failure to
+        arrive owns the fetch, the rest wait on its result, and no thread holds
+        a lock while the network is slow. A failed listing is cached as None so
+        an unreachable provider is asked once, not once per failure.
+        """
+        with self._model_list_lock:
+            pending = self._model_lists.get(provider_name)
+            fetch = pending is None
+            if fetch:
+                pending = Future()
+                self._model_lists[provider_name] = pending
+        if fetch:
+            models: list[str] | None = None
+            try:
+                models = self._list_models_for(provider_name)
+            except Exception:  # noqa: BLE001 - a missing list is not worth a second failure
+                models = None
+            finally:
+                # In `finally` so a BaseException cannot leave siblings waiting
+                # on a result that will never be set.
+                pending.set_result(models)
+        try:
+            return pending.result(timeout=_MODEL_LIST_TIMEOUT)
+        except Exception:  # noqa: BLE001 - the hint degrades; the failure still reports
+            return None
 
     def effective_system(self, state: ConversationState) -> str:
         """The named state's base prompt plus the skills catalog and workspace.
@@ -334,7 +409,13 @@ class Harness:
             return f"Subagent did not converge on an answer: {exc}"
         except Exception as exc:  # noqa: BLE001 - surface subagent failure to the caller
             self._log(self.ansi.red(f"[{name}] error: {type(exc).__name__}: {exc}"), write)
-            return _subagent_failure(provider_name, model_name, exc)
+            # Only pay for a listing when the names are the problem — a
+            # connection error is not a naming problem, and asking the same
+            # unreachable endpoint for its catalogue would just fail again.
+            models = (
+                self._models_for_failure(provider_name) if is_model_not_found(exc) else None
+            )
+            return _subagent_failure(provider_name, model_name, exc, models)
 
         answer = answer or "(the subagent produced no text answer)"
         self._log(
@@ -554,6 +635,11 @@ def split_background(line: str) -> tuple[str, bool]:
 
 # How long /quit waits for a running job before naming it abandoned and going.
 _JOB_SHUTDOWN_GRACE = 2.0
+
+# Cap on waiting for another thread's in-flight model listing. Bounded because
+# this runs inside a failure path: a hint worth having is not worth hanging a
+# turn for, and the failure still reports without it.
+_MODEL_LIST_TIMEOUT = 20.0
 
 _NEW_PARSER = argparse.ArgumentParser(prog="/new", add_help=False)
 _NEW_PARSER.add_argument("name")

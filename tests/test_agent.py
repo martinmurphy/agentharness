@@ -708,49 +708,108 @@ def test_four_subagents_in_one_message_run_concurrently(tmp_path, monkeypatch, c
     assert h.states.active.name == "default"
 
 
-def _failing_spawn_harness(tmp_path, monkeypatch, exc):
-    """A harness whose subagent provider raises ``exc`` on its first chat()."""
+def _not_found(message: str, attr: str = "status_code"):
+    exc = RuntimeError(message)
+    setattr(exc, attr, 404)
+    return exc
+
+
+def _failing_spawn_harness(tmp_path, monkeypatch, exc, models=None, listings=None):
+    """A harness whose subagent provider raises ``exc`` on its first chat().
+
+    ``models`` gives that provider a list_models; omit it for a provider that
+    cannot list. ``listings``, if passed, counts the listing calls made.
+    """
     from agentharness import repl
 
     class Failing(FakeProvider):
         def chat(self, *, system, messages, tools, max_tokens):
             raise exc
 
-    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: Failing([]))
+    class Listing(Failing):
+        def list_models(self):
+            if listings is not None:
+                listings.append(1)
+            return list(models)
+
+    cls = Listing if models is not None else Failing
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: cls([]))
     return repl.Harness(
         Config(skills_dir=str(tmp_path), workspace_dir=str(_ws(tmp_path).root))
     )
 
 
-def test_a_bad_model_name_tells_the_caller_how_to_recover(tmp_path, monkeypatch):
+ANTHROPIC_404 = (
+    "Error code: 404 - {'type': 'error', 'error': {'type': 'not_found_error', "
+    "'message': 'model: claude-opus-4-1'}}"
+)
+
+
+def test_a_bad_model_name_comes_back_with_the_names_that_would_work(tmp_path, monkeypatch):
     """The tool result is the only channel back into the calling model's context.
 
-    A raw SDK 404 says what broke but not what to do, so the caller has to infer
-    "look the names up first" — which is exactly what it failed to do on the way
-    in. The result names the next call instead.
+    Telling it to go and call list_models costs a round trip and, worse, relies
+    on it choosing to take the advice. The names are already one call away at
+    the point of failure, so they ride back with the error and the very next
+    message can spawn correctly.
     """
-    exc = RuntimeError(
-        "Error code: 404 - {'type': 'error', 'error': {'type': 'not_found_error', "
-        "'message': 'model: claude-haiku'}}"
+    h = _failing_spawn_harness(
+        tmp_path, monkeypatch, _not_found(ANTHROPIC_404),
+        models=["claude-opus-5", "claude-haiku-4-5-20251001"],
     )
-    exc.status_code = 404
-    h = _failing_spawn_harness(tmp_path, monkeypatch, exc)
+    answer = h._spawn_subagent("q", "anthropic", "claude-opus-4-1")
 
-    answer = h._spawn_subagent("what is the capital of ireland?", "anthropic", "claude-haiku")
-    assert "claude-haiku" in answer and "anthropic" in answer
-    assert "list_models(provider='anthropic')" in answer
+    assert "claude-opus-4-1" in answer and "anthropic" in answer
+    assert "claude-opus-5" in answer and "claude-haiku-4-5-20251001" in answer
     assert "404" in answer  # the original detail is kept, not swallowed
 
 
-def test_a_listed_model_that_still_fails_is_named_as_such(tmp_path, monkeypatch):
-    """Gemini lists models it will not serve to new accounts; say so, or the
-    caller loops between list_models and the same 404."""
-    exc = RuntimeError("404 NOT_FOUND. models/gemini-2.5-flash is no longer available")
-    exc.code = 404
-    h = _failing_spawn_harness(tmp_path, monkeypatch, exc)
+def test_the_names_are_fetched_once_per_provider(tmp_path, monkeypatch):
+    """Four subagents failing together must not mean four identical listings."""
+    listings: list[int] = []
+    h = _failing_spawn_harness(
+        tmp_path, monkeypatch, _not_found(ANTHROPIC_404),
+        models=["claude-opus-5"], listings=listings,
+    )
+    for bad in ("claude-opus-4-1", "claude-haiku-3-5", "claude-sonnet-9"):
+        assert "claude-opus-5" in h._spawn_subagent("q", "anthropic", bad)
+    assert len(listings) == 1  # cached after the first failure
 
+
+def test_a_provider_that_cannot_list_still_says_what_to_do(tmp_path, monkeypatch):
+    """No listing available (unsupported, no key, network down) — fall back to
+    naming the call rather than losing the hint entirely."""
+    h = _failing_spawn_harness(tmp_path, monkeypatch, _not_found(ANTHROPIC_404))
+    answer = h._spawn_subagent("q", "anthropic", "claude-opus-4-1")
+    assert "list_models(provider='anthropic')" in answer
+    assert "404" in answer
+
+
+def test_an_unrelated_failure_does_not_trigger_a_listing(tmp_path, monkeypatch):
+    """A connection error is not a naming problem; do not pay for a listing."""
+    listings: list[int] = []
+    h = _failing_spawn_harness(
+        tmp_path, monkeypatch, RuntimeError("Connection error."),
+        models=["claude-opus-5"], listings=listings,
+    )
+    answer = h._spawn_subagent("q", "anthropic", "claude-opus-5")
+    assert "Connection error." in answer
+    assert listings == []
+
+
+def test_a_listed_model_that_still_fails_is_named_as_such(tmp_path, monkeypatch):
+    """Gemini serves a list containing names it refuses to new accounts, so the
+    caveat has to survive into the variant that quotes the list — otherwise the
+    caller picks the same name straight back out of it."""
+    exc = _not_found(
+        "404 NOT_FOUND. models/gemini-2.5-flash is no longer available", attr="code"
+    )
+    h = _failing_spawn_harness(
+        tmp_path, monkeypatch, exc, models=["gemini-2.5-flash", "gemini-flash-latest"]
+    )
     answer = h._spawn_subagent("q", "gemini", "gemini-2.5-flash")
-    assert "not available to this account" in answer
+    assert "gemini-flash-latest" in answer  # the list is there
+    assert "not available to this account" in answer  # and so is the caveat
 
 
 def test_an_unrelated_subagent_failure_gets_no_hint(tmp_path, monkeypatch):
@@ -759,6 +818,17 @@ def test_an_unrelated_subagent_failure_gets_no_hint(tmp_path, monkeypatch):
     answer = h._spawn_subagent("q", "anthropic", "claude-opus-5")
     assert "Subagent failed" in answer and "Connection error." in answer
     assert "list_models" not in answer
+
+
+def test_a_long_model_list_is_capped(tmp_path, monkeypatch):
+    """A provider serving hundreds must not paste all of them into the context."""
+    from agentharness import repl
+
+    names = [f"model-{i:03d}" for i in range(200)]
+    h = _failing_spawn_harness(tmp_path, monkeypatch, _not_found(ANTHROPIC_404), models=names)
+    answer = h._spawn_subagent("q", "anthropic", "nope")
+    assert answer.count("model-") <= repl._MAX_LISTED_MODELS + 1  # +1 for the "N more"
+    assert "more" in answer
 
 
 def test_spawn_subagent_max_iterations_leaves_active_untouched(tmp_path, monkeypatch):

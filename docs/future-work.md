@@ -159,26 +159,34 @@ can be: the reachable set depends on the provider, the key, and the account, and
 is not knowable at schema-build time. `provider` is an enum and was always right;
 `model` is prose and was always wrong.
 
-**Partly addressed.** The failure path now classifies a not-found error
-(`providers.base.is_model_not_found`) and returns a result naming the next call
-— *"model X is not available on provider Y; call list_models(provider='Y')"* —
-plus the caveat that a listed name which fails the same way is not available to
-this account, which is the `gemini-2.5-flash` case. Chosen over a description
-sentence telling the model to look names up first, because that is the same
-unverifiable lever as the batching fix, whereas this one is testable against a
-fake provider and lands precisely when the model has already guessed wrong.
+**Partly addressed.** The failure path classifies a not-found error
+(`providers.base.is_model_not_found`) and returns the names that *would* have
+worked, fetched once per provider and cached, plus the caveat that a listed
+name failing the same way is not served to this account — the
+`gemini-2.5-flash` case.
 
-**What is still open.** Recovery, not prevention: the caller still spends a
-round trip and a batch of dead subagent states before it sees the hint. Closing
-that means validating the model ID before spawning, which needs each provider's
-list cached at startup — a call per provider, on a REPL that currently starts
-without touching the network and works with no key set. It would also still
-miss the listed-but-not-served case, since only the call itself reveals that.
-So the trade is a real startup cost for a partial guarantee, which is why it is
-here rather than done.
+Quoting the list is the second iteration. The first only *named* the call to
+make (*"call list_models(provider='Y')"*), and a real run showed why that was
+not enough: the model already called `list_models` unprompted, both with the
+hint and without it, so the advice changed nothing — same five model calls,
+same nine subagent states, same recovery. Advice a caller was going to follow
+anyway buys nothing; the round trip is the cost, so the fix has to remove the
+round trip. It also rules out the cheaper option of a description sentence
+telling the model to look names up first: on the run that prompted this, the
+model was given `claude-opus-5` verbatim in the user's prompt and spawned
+`claude-opus-4-1` anyway. It is not failing to follow instructions about
+lookups; it is confabulating IDs it was handed correctly.
 
-Not a concurrency bug: the four failures stayed isolated to their own subagents
-and came back as ordinary tool results, which is what should happen.
+**What is still open.** Recovery, not prevention: the caller spends one failed
+batch and a set of dead subagent states before the names reach it. Closing that
+means validating before spawning, which needs each provider's list fetched at
+startup — a call per provider, on a REPL that currently starts without touching
+the network and runs with no key set — and would *still* miss the
+listed-but-not-served case, since only the call reveals it. A real startup cost
+for a partial guarantee, which is why it is here rather than done.
+
+Not a concurrency bug: the failures stayed isolated to their own subagents and
+came back as ordinary tool results, which is what should happen.
 
 ## An ignore list for list_dir
 
