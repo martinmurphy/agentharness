@@ -20,6 +20,7 @@ from agentharness.providers.base import (
     ToolCall,
     ToolResult,
     ToolSpec,
+    is_model_not_found,
 )
 from agentharness.providers.openai_compatible import OpenAICompatibleProvider
 
@@ -1049,3 +1050,68 @@ def test_openai_replay_still_sends_an_explicit_null_content():
 
     assert first.message.provider_raw["content"] is None
     assert first.message.tool_calls()[0].arguments == {"name": "demo"}
+
+
+# ---- classifying a "that model does not exist" failure ------------------------
+#
+# The three strings below are verbatim from a real run that spawned four
+# subagents on invented model IDs. They are the whole reason the rule is what it
+# is: the model name appears in two of them and not in the third, so matching on
+# the name would miss Cerebras.
+
+
+def _sdk_error(message: str, *, status_code=None, code=None):
+    """An exception shaped like an SDK's, carrying whatever status attrs it uses."""
+    exc = RuntimeError(message)
+    if status_code is not None:
+        exc.status_code = status_code
+    if code is not None:
+        exc.code = code
+    return exc
+
+
+ANTHROPIC_404 = (
+    "Error code: 404 - {'type': 'error', 'error': {'type': 'not_found_error', "
+    "'message': 'model: claude-haiku'}, 'request_id': 'req_011Ce2xLLkz1GYzmqLs45Bcz'}"
+)
+GEMINI_404 = (
+    "404 NOT_FOUND. {'error': {'code': 404, 'message': 'This model "
+    "models/gemini-2.5-flash is no longer available to new users. Please update "
+    "your code to use a newer model.', 'status': 'NOT_FOUND'}}"
+)
+CEREBRAS_404 = (
+    "Error code: 404 - {'message': 'Model does not exist or you do not have "
+    "access to it.', 'type': 'not_found_error', 'param': 'model', "
+    "'code': 'model_not_found'}"
+)
+
+
+def test_model_not_found_recognises_anthropic():
+    assert is_model_not_found(_sdk_error(ANTHROPIC_404, status_code=404))
+
+
+def test_model_not_found_recognises_gemini():
+    """google-genai puts the status on `code`, not `status_code`."""
+    assert is_model_not_found(_sdk_error(GEMINI_404, code=404))
+
+
+def test_model_not_found_recognises_an_openai_compatible_endpoint():
+    """Cerebras names no model in the text — matching the name would miss this."""
+    assert CEREBRAS_404.count("claude") == 0
+    assert is_model_not_found(_sdk_error(CEREBRAS_404, status_code=404, code="model_not_found"))
+
+
+def test_a_404_that_is_not_about_a_model_is_not_one():
+    """A wrong base_url 404s too, and 'call list_models' would be bad advice."""
+    assert not is_model_not_found(
+        _sdk_error("Error code: 404 - {'detail': 'Not Found'}", status_code=404)
+    )
+
+
+def test_other_statuses_are_not_model_errors():
+    assert not is_model_not_found(_sdk_error("500 - model overloaded", status_code=500))
+    assert not is_model_not_found(_sdk_error("401 - bad key, model x", status_code=401))
+
+
+def test_an_exception_with_no_status_is_not_a_model_error():
+    assert not is_model_not_found(RuntimeError("Connection error."))

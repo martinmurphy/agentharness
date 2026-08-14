@@ -136,3 +136,37 @@ class Provider(Protocol):
         also tolerate its absence and any SDK/network error.
         """
         ...
+
+
+# ---- error classification ----------------------------------------------------
+
+
+def is_model_not_found(exc: BaseException) -> bool:
+    """True if this failure means "that model ID is not one I serve".
+
+    Worth telling apart from every other failure because it is the one with an
+    obvious next move — look the names up — and the caller that hit it is
+    usually a model, which will only make that move if something says so.
+
+    Deliberately one duck-typed rule rather than a method on each adapter. The
+    SDKs differ only in which attribute carries the HTTP status (the Anthropic
+    and OpenAI clients use ``status_code``; ``google-genai`` uses ``code``), and
+    a rule per adapter would be three copies of one rule — including for the
+    next adapter, which will also be HTTP.
+
+    The status alone is not enough: a wrong ``base_url`` 404s as readily as a
+    wrong model, and answering that with "call list_models" sends the caller
+    somewhere that will fail too. Requiring the word *model* in the message
+    separates them — every SDK names the thing it could not find, whether or not
+    it echoes the ID (Cerebras returns "Model does not exist" and no ID at all).
+
+    Only the exception itself is examined, not its ``__cause__`` chain: an SDK
+    that wrapped a 404 in something else would be missed, and the caller simply
+    gets the unhinted message it got before.
+    """
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        status = getattr(exc, "code", None)
+    if str(status) != "404":
+        return False
+    return "model" in str(exc).lower()

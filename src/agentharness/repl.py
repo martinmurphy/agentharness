@@ -21,7 +21,13 @@ from agentharness.jobs import Job, JobRunner
 from agentharness.mcp import oauth
 from agentharness.mcp.config import parse_servers
 from agentharness.mcp.manager import McpManager
-from agentharness.providers.base import Message, Provider, TextBlock, Usage
+from agentharness.providers.base import (
+    Message,
+    Provider,
+    TextBlock,
+    Usage,
+    is_model_not_found,
+)
 from agentharness.providers.factory import (
     build_provider,
     known_providers,
@@ -80,6 +86,30 @@ class _Ansi:
 def _truncate(text: str, limit: int = 300) -> str:
     text = text.replace("\n", " ")
     return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def _subagent_failure(provider_name: str, model_name: str, exc: Exception) -> str:
+    """What the *calling model* is told when a subagent could not run.
+
+    This string is the only channel back into that model's context, so it is
+    where a recoverable failure has to say how to recover. A raw SDK 404 states
+    what broke and leaves the next move to be inferred — and the caller that
+    just invented a model ID is not the one to trust with that inference. The
+    original detail is kept either way; the hint is added, never substituted.
+
+    ``_describe_error`` is this function's opposite number on the foreground
+    path: same job, aimed at the person at the terminal instead.
+    """
+    detail = f"{type(exc).__name__}: {exc}"
+    if not is_model_not_found(exc):
+        return f"Subagent failed: {detail}"
+    return (
+        f"Subagent failed: model {model_name!r} is not available on provider "
+        f"{provider_name!r}. Call list_models(provider={provider_name!r}) for the "
+        f"names it serves, then spawn again with one of those. If a name from "
+        f"that list fails the same way, it is listed but not available to this "
+        f"account — choose a different one rather than retrying it. ({detail})"
+    )
 
 
 def _root_cause(exc: BaseException) -> BaseException:
@@ -304,7 +334,7 @@ class Harness:
             return f"Subagent did not converge on an answer: {exc}"
         except Exception as exc:  # noqa: BLE001 - surface subagent failure to the caller
             self._log(self.ansi.red(f"[{name}] error: {type(exc).__name__}: {exc}"), write)
-            return f"Subagent failed: {type(exc).__name__}: {exc}"
+            return _subagent_failure(provider_name, model_name, exc)
 
         answer = answer or "(the subagent produced no text answer)"
         self._log(

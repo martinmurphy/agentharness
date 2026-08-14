@@ -159,16 +159,23 @@ can be: the reachable set depends on the provider, the key, and the account, and
 is not knowable at schema-build time. `provider` is an enum and was always right;
 `model` is prose and was always wrong.
 
-**Why deferred.** The cheap fix is another description sentence — call
-`list_models` first when naming a model you have not confirmed — which is the
-same lever that fixed batching, and unverifiable the same way. Better but more
-work: have the spawn failure path recognise a not-found error and say so in the
-result (*"model X is not available on provider Y; call list_models"*), turning a
-dead end into a recovery hint rather than relying on the model to think of it.
-Best and most expensive: cache each provider's model list at connect time and
-validate before spawning, which trades a startup call per provider for the
-guarantee — and still cannot catch the "listed but not available to you" case
-above.
+**Partly addressed.** The failure path now classifies a not-found error
+(`providers.base.is_model_not_found`) and returns a result naming the next call
+— *"model X is not available on provider Y; call list_models(provider='Y')"* —
+plus the caveat that a listed name which fails the same way is not available to
+this account, which is the `gemini-2.5-flash` case. Chosen over a description
+sentence telling the model to look names up first, because that is the same
+unverifiable lever as the batching fix, whereas this one is testable against a
+fake provider and lands precisely when the model has already guessed wrong.
+
+**What is still open.** Recovery, not prevention: the caller still spends a
+round trip and a batch of dead subagent states before it sees the hint. Closing
+that means validating the model ID before spawning, which needs each provider's
+list cached at startup — a call per provider, on a REPL that currently starts
+without touching the network and works with no key set. It would also still
+miss the listed-but-not-served case, since only the call itself reveals that.
+So the trade is a real startup cost for a partial guarantee, which is why it is
+here rather than done.
 
 Not a concurrency bug: the four failures stayed isolated to their own subagents
 and came back as ordinary tool results, which is what should happen.

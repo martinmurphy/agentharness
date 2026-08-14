@@ -708,6 +708,59 @@ def test_four_subagents_in_one_message_run_concurrently(tmp_path, monkeypatch, c
     assert h.states.active.name == "default"
 
 
+def _failing_spawn_harness(tmp_path, monkeypatch, exc):
+    """A harness whose subagent provider raises ``exc`` on its first chat()."""
+    from agentharness import repl
+
+    class Failing(FakeProvider):
+        def chat(self, *, system, messages, tools, max_tokens):
+            raise exc
+
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: Failing([]))
+    return repl.Harness(
+        Config(skills_dir=str(tmp_path), workspace_dir=str(_ws(tmp_path).root))
+    )
+
+
+def test_a_bad_model_name_tells_the_caller_how_to_recover(tmp_path, monkeypatch):
+    """The tool result is the only channel back into the calling model's context.
+
+    A raw SDK 404 says what broke but not what to do, so the caller has to infer
+    "look the names up first" — which is exactly what it failed to do on the way
+    in. The result names the next call instead.
+    """
+    exc = RuntimeError(
+        "Error code: 404 - {'type': 'error', 'error': {'type': 'not_found_error', "
+        "'message': 'model: claude-haiku'}}"
+    )
+    exc.status_code = 404
+    h = _failing_spawn_harness(tmp_path, monkeypatch, exc)
+
+    answer = h._spawn_subagent("what is the capital of ireland?", "anthropic", "claude-haiku")
+    assert "claude-haiku" in answer and "anthropic" in answer
+    assert "list_models(provider='anthropic')" in answer
+    assert "404" in answer  # the original detail is kept, not swallowed
+
+
+def test_a_listed_model_that_still_fails_is_named_as_such(tmp_path, monkeypatch):
+    """Gemini lists models it will not serve to new accounts; say so, or the
+    caller loops between list_models and the same 404."""
+    exc = RuntimeError("404 NOT_FOUND. models/gemini-2.5-flash is no longer available")
+    exc.code = 404
+    h = _failing_spawn_harness(tmp_path, monkeypatch, exc)
+
+    answer = h._spawn_subagent("q", "gemini", "gemini-2.5-flash")
+    assert "not available to this account" in answer
+
+
+def test_an_unrelated_subagent_failure_gets_no_hint(tmp_path, monkeypatch):
+    """Bad advice is worse than none: a network failure is not a naming problem."""
+    h = _failing_spawn_harness(tmp_path, monkeypatch, RuntimeError("Connection error."))
+    answer = h._spawn_subagent("q", "anthropic", "claude-opus-5")
+    assert "Subagent failed" in answer and "Connection error." in answer
+    assert "list_models" not in answer
+
+
 def test_spawn_subagent_max_iterations_leaves_active_untouched(tmp_path, monkeypatch):
     script = [_tool_response("c", "greet", {"name": "X"}) for _ in range(20)]
     h, _ = _spawn_harness(tmp_path, monkeypatch, script, max_tool_iterations=3)
