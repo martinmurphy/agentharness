@@ -22,7 +22,9 @@ Three requirements drive the architecture:
   the host and running `/reload` in the REPL is the iteration cycle.
 - **Multiple independent states.** Separate conversations, each with its own
   history, system prompt, provider, and model. Sequential only — no concurrent
-  model calls.
+  model calls. *(Lifted later: one message's tool calls run in parallel and a
+  turn can run in the background, on threads. Still one in-flight turn per
+  state — see [`plan-async-harness.md`](plan-async-harness.md).)*
 
 Decisions taken up front (from the design questions):
 
@@ -333,8 +335,8 @@ via `/reload`, and ephemeral (in-memory) state across restarts.
 
 ## Post-build increments
 
-Features added after the initial four-phase build, each landed against the seams above with no
-change to the agent loop:
+Features added after the initial four-phase build, each landed against the seams above. Every one
+until the last left the agent loop untouched; parallel dispatch is the first that changed it.
 
 - **Gemini provider (AI Studio)** — a third `Provider` adapter (`providers/gemini.py`) using the
   `google-genai` SDK, key from `GEMINI_API_KEY`. Maps roles (assistant→model, tool results→user
@@ -379,4 +381,14 @@ change to the agent loop:
 - **`spawn_subagent` tool** — delegation: the model spawns a fresh state (defaulting to its own
   provider/model, or a different one), runs a full tool/skill loop until it answers, and gets the
   answer back. Recursion-safe (subagents get the base toolset without `spawn_subagent`); the
-  caller's active state is restored after the run; processing is logged to the REPL.
+  subagent's state is created but never activated, so the caller's conversation is untouched;
+  processing is logged to the turn's output sink.
+- **Parallel tool calls and background turns** — the "sequential only" constraint above, lifted.
+  One assistant message's tool calls run on a per-turn `ThreadPoolExecutor` (`max_concurrency`),
+  rendered as they land but recorded in call order; a prompt ending in ` &` runs on a
+  `JobRunner` worker (`max_jobs`) with its output buffered for `/job`. Threads rather than
+  `asyncio`, because all three provider SDKs and every tool handler are synchronous. What made
+  it possible: a `contextvars` run context (`context.py`) carrying the state whose turn is
+  executing and where it renders, replacing the ambient `states.active` that three tools used to
+  read — ambient input cannot be shared by racing turns. Detailed design note:
+  [`plan-async-harness.md`](plan-async-harness.md).

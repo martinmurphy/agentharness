@@ -139,9 +139,10 @@ observed working.
 what should stop is the unrelated file and provider poking.
 
 **If it doesn't hold.** The structural fix is to stop `effective_system()` from
-advertising the workspace on the subagent path. It is evaluated *after*
-`states.new()` makes the subagent active, so a subagent inherits the workspace
-line written for the main conversation.
+advertising the workspace on the subagent path. It now takes the state it is
+building a prompt for (subagents are no longer activated), but it still appends
+the workspace paragraph for every state, so a subagent inherits the line written
+for the main conversation.
 
 ## An ignore list for list_dir
 

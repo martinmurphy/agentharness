@@ -32,6 +32,10 @@ model.
   path is confined to it.
 - **Multiple states** — independent in-memory conversations, each with its own
   history, system prompt, provider, and model.
+- **Parallel work** — tool calls the model makes in one message run
+  concurrently, so four `spawn_subagent` calls cost one round trip rather than
+  four; and a prompt ending in ` &` runs in the background, leaving the prompt
+  free for another state. See *Background jobs*.
 - **Providers** — Anthropic, the same models through Google Vertex AI, Google
   Gemini (AI Studio), and any OpenAI-compatible endpoint (OpenAI, Ollama, vLLM,
   …). `providers:` is a registry rather than a fixed list of names: a *second*
@@ -105,6 +109,8 @@ ANTHROPIC_API_KEY=sk-... .venv/bin/agentharness
 /reload                                  re-scan the skills directory
 /mcp [tools S | reconnect S | login S]   MCP servers, their tools, status, and OAuth login
 /usage [--all]                           token usage for the active state (or every state)
+/jobs                                    list background jobs
+/job <id>                                replay a background job's output
 /quit                                    exit
 ```
 
@@ -125,6 +131,38 @@ Each state can target a different backend:
 /new research --provider openai --model gpt-4o
 /new gem      --provider gemini --model gemini-3.5-flash
 ```
+
+### Background jobs
+
+A prompt ending in a standalone ` &` runs in the background and hands the prompt
+straight back:
+
+```
+[default] › summarise the workspace &
+[job 1] started on default
+[default] › /jobs
+    1  running  default     12s  summarise the workspace
+[default] › /new scratch
+[scratch] › what is 2+2                 # works while job 1 runs
+[scratch] › /job 1                      # the job's output, replayed in full
+```
+
+Backgrounding is always explicit — a slow turn never takes the terminal away on
+its own. A job's output is buffered rather than printed, because a job writing
+while you are typing would scribble over the line readline owns; only a one-line
+completion notice reaches the terminal, and it waits for the next prompt.
+
+**One in-flight turn per state.** A second prompt on a busy state is refused
+rather than queued: two turns appending to one history interleave into a
+transcript neither of them wrote. Concurrency comes from using more states —
+`/switch` or `/new`. `/delete` and `/reset` are refused on a busy state for the
+same reason. `max_jobs` (default 4) caps how many run at once.
+
+Within a single turn, tool calls the model makes in one message run
+concurrently, up to `max_concurrency` (default 8); set it to `1` for the old
+sequential dispatch. Results are *rendered* as they land, so you can see
+progress, but recorded in the model's call order, so the transcript replays the
+same way every time.
 
 ## Configuration
 
@@ -472,6 +510,8 @@ src/agentharness/
   config.py            Config dataclass; YAML + env resolution
   repl.py              REPL loop and slash commands
   agent.py             provider-neutral agent loop (yields events)
+  context.py           the running turn: its state and its output sink
+  jobs.py              background turns: Job + JobRunner
   state.py             ConversationState + StateManager (in-memory)
   workspace.py         workspace root + confined filesystem operations
   skills/              Skill model, discovery, validation, catalog

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import threading
+
 import pytest
 
-from agentharness import agent
+from agentharness import agent, context
 from agentharness.config import Config
 from agentharness.providers.base import (
     Message,
@@ -15,8 +17,14 @@ from agentharness.providers.base import (
 )
 from agentharness.skills.loader import load_skills
 from agentharness.state import StateManager
-from agentharness.tools.registry import build_default_registry
+from agentharness.tools.registry import Tool, ToolRegistry, build_default_registry
 from agentharness.workspace import Workspace
+
+# Every barrier and gate in this file is bounded: concurrency is proved by
+# arranging a rendezvous that only completes if the calls genuinely overlap, and
+# a timeout is what turns "they ran in sequence" into a failure rather than a
+# hang. Nothing here asserts on elapsed time.
+TIMEOUT = 5.0
 
 
 def _ws(tmp_path):
@@ -54,6 +62,18 @@ def _text_response(text, usage=None):
 def _tool_response(call_id, name, args, usage=None):
     return ProviderResponse(
         message=Message(role="assistant", blocks=[ToolCall(id=call_id, name=name, arguments=args)]),
+        stop_reason="tool_use",
+        usage=usage or Usage(input_tokens=5, output_tokens=4),
+    )
+
+
+def _multi_tool_response(calls, usage=None):
+    """One assistant message carrying several tool calls: (id, name, args)."""
+    return ProviderResponse(
+        message=Message(
+            role="assistant",
+            blocks=[ToolCall(id=cid, name=name, arguments=args) for cid, name, args in calls],
+        ),
         stop_reason="tool_use",
         usage=usage or Usage(input_tokens=5, output_tokens=4),
     )
@@ -133,6 +153,207 @@ def test_max_iterations_guard(tmp_path):
 
     with pytest.raises(agent.MaxIterationsExceeded):
         _drive(provider, state, registry, max_iterations=3)
+
+
+# ---- parallel tool dispatch -------------------------------------------------
+
+
+def _rendezvous_registry(n: int) -> tuple[ToolRegistry, threading.Barrier]:
+    """A ``block`` tool whose N calls must overlap, then finish in reverse.
+
+    Two mechanisms, doing two different jobs. The barrier is the proof of
+    concurrency: it only trips once all N handlers are inside it at the same
+    moment, so a sequential dispatcher hangs on the first one and fails on its
+    timeout. The gate chain then releases them from the last call to the first,
+    which makes completion order the exact reverse of call order — and that is
+    what a test of result ordering needs to be able to see.
+    """
+    barrier = threading.Barrier(n, timeout=TIMEOUT)
+    gates = [threading.Event() for _ in range(n)]
+    gates[-1].set()
+
+    def handler(args: dict) -> str:
+        i = args["i"]
+        barrier.wait()
+        gates[i].wait(timeout=TIMEOUT)
+        if i > 0:
+            gates[i - 1].set()
+        if args.get("fail"):
+            raise RuntimeError(f"boom {i}")
+        return f"result-{i}"
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="block",
+            description="Blocks until every sibling call has arrived.",
+            input_schema={"type": "object", "properties": {"i": {"type": "integer"}}},
+            handler=handler,
+        )
+    )
+    return registry, barrier
+
+
+def _blocking_calls(n: int, failing: set[int] | None = None):
+    failing = failing or set()
+    return [
+        (f"c{i}", "block", {"i": i, "fail": i in failing}) for i in range(n)
+    ]
+
+
+def test_parallel_calls_all_run_at_once(tmp_path):
+    n = 4
+    registry, _ = _rendezvous_registry(n)
+    provider = FakeProvider([_multi_tool_response(_blocking_calls(n)), _text_response("done")])
+    state = _manager(provider).active
+    state.add(Message(role="user", blocks=[TextBlock("go")]))
+
+    events = list(
+        agent.run_turn(
+            provider=provider, state=state, registry=registry,
+            system="SYS", max_tokens=100, max_iterations=5, max_concurrency=n,
+        )
+    )
+    results = [e.result for e in events if isinstance(e, agent.ToolResultEvent)]
+    assert len(results) == n
+    assert not any(r.is_error for r in results)  # nobody timed out on the barrier
+
+
+def test_parallel_results_are_stored_in_call_order(tmp_path):
+    """Rendering follows completion; history follows the model's call order."""
+    n = 4
+    registry, _ = _rendezvous_registry(n)
+    provider = FakeProvider([_multi_tool_response(_blocking_calls(n)), _text_response("done")])
+    state = _manager(provider).active
+    state.add(Message(role="user", blocks=[TextBlock("go")]))
+
+    events = list(
+        agent.run_turn(
+            provider=provider, state=state, registry=registry,
+            system="SYS", max_tokens=100, max_iterations=5, max_concurrency=n,
+        )
+    )
+    yielded = [e.result.content for e in events if isinstance(e, agent.ToolResultEvent)]
+    assert yielded == [f"result-{i}" for i in reversed(range(n))]  # completion order
+
+    tool_message = next(m for m in state.messages if m.role == "tool")
+    assert [b.content for b in tool_message.blocks] == [f"result-{i}" for i in range(n)]
+    # …and each result still carries the id of the call it answers.
+    assert [b.call_id for b in tool_message.blocks] == [f"c{i}" for i in range(n)]
+
+
+def test_a_failing_call_does_not_take_its_siblings_with_it(tmp_path):
+    n = 3
+    registry, _ = _rendezvous_registry(n)
+    provider = FakeProvider(
+        [_multi_tool_response(_blocking_calls(n, failing={1})), _text_response("done")]
+    )
+    state = _manager(provider).active
+    state.add(Message(role="user", blocks=[TextBlock("go")]))
+
+    list(
+        agent.run_turn(
+            provider=provider, state=state, registry=registry,
+            system="SYS", max_tokens=100, max_iterations=5, max_concurrency=n,
+        )
+    )
+    blocks = next(m for m in state.messages if m.role == "tool").blocks
+    assert [b.is_error for b in blocks] == [False, True, False]
+    assert "boom 1" in blocks[1].content
+
+
+def test_single_call_still_dispatches_inline(tmp_path):
+    """One call must not need a pool — a barrier of 1 would trip either way, so
+    this asserts the handler ran on the calling thread."""
+    threads = []
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="whoami",
+            description="Records the thread it ran on.",
+            input_schema={"type": "object", "properties": {}},
+            handler=lambda args: threads.append(threading.current_thread().name) or "ok",
+        )
+    )
+    provider = FakeProvider([_tool_response("c0", "whoami", {}), _text_response("done")])
+    state = _manager(provider).active
+    state.add(Message(role="user", blocks=[TextBlock("go")]))
+
+    list(
+        agent.run_turn(
+            provider=provider, state=state, registry=registry,
+            system="SYS", max_tokens=100, max_iterations=5, max_concurrency=8,
+        )
+    )
+    assert threads == [threading.current_thread().name]
+
+
+def test_max_concurrency_of_one_is_sequential(tmp_path):
+    """The escape hatch: max_concurrency=1 restores the old dispatch exactly."""
+    threads = []
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="whoami",
+            description="Records the thread it ran on.",
+            input_schema={"type": "object", "properties": {}},
+            handler=lambda args: threads.append(threading.current_thread().name) or "ok",
+        )
+    )
+    calls = [(f"c{i}", "whoami", {}) for i in range(3)]
+    provider = FakeProvider([_multi_tool_response(calls), _text_response("done")])
+    state = _manager(provider).active
+    state.add(Message(role="user", blocks=[TextBlock("go")]))
+
+    list(
+        agent.run_turn(
+            provider=provider, state=state, registry=registry,
+            system="SYS", max_tokens=100, max_iterations=5, max_concurrency=1,
+        )
+    )
+    assert threads == [threading.current_thread().name] * 3
+
+
+def test_run_context_reaches_pool_workers(tmp_path):
+    """A worker starts with an empty context, so dispatch must carry it in.
+
+    Without the ``copy_context()`` propagation every handler would see None —
+    and the harness would quietly fall back to whichever state happens to be
+    active, which is the ambient-state bug this whole change exists to remove.
+    """
+    seen: dict[int, str | None] = {}
+    n = 3
+    barrier = threading.Barrier(n, timeout=TIMEOUT)
+
+    def handler(args: dict) -> str:
+        barrier.wait()
+        ctx = context.current()
+        seen[args["i"]] = None if ctx is None else ctx.state.name
+        return "ok"
+
+    registry = ToolRegistry()
+    registry.register(
+        Tool(
+            name="whose",
+            description="Reports the run context it sees.",
+            input_schema={"type": "object", "properties": {"i": {"type": "integer"}}},
+            handler=handler,
+        )
+    )
+    calls = [(f"c{i}", "whose", {"i": i}) for i in range(n)]
+    provider = FakeProvider([_multi_tool_response(calls), _text_response("done")])
+    state = _manager(provider).active
+    state.add(Message(role="user", blocks=[TextBlock("go")]))
+
+    with context.running(state, lambda line: None):
+        list(
+            agent.run_turn(
+                provider=provider, state=state, registry=registry,
+                system="SYS", max_tokens=100, max_iterations=5, max_concurrency=n,
+            )
+        )
+    assert seen == {i: "default" for i in range(n)}
 
 
 # ---- state manager ----------------------------------------------------------
@@ -389,7 +610,7 @@ def test_spawn_subagent_returns_answer(tmp_path, monkeypatch, capsys):
     assert answer == "42"
     out = capsys.readouterr().out
     assert "created" in out and "task:" in out and "returning result" in out
-    assert h.states.active.name == "default"  # caller's active state restored
+    assert h.states.active.name == "default"  # the subagent was never activated
     assert any(n.startswith("subagent-") for n in h.states.names())  # state persisted
 
 
@@ -449,12 +670,50 @@ def test_subagent_registry_excludes_spawn_tool(tmp_path, monkeypatch):
     assert "list_models" in h._subagent_registry
 
 
-def test_spawn_subagent_max_iterations_restores_active(tmp_path, monkeypatch):
+def test_four_subagents_in_one_message_run_concurrently(tmp_path, monkeypatch, capsys):
+    """The case the whole change is for: four models asked the same question.
+
+    The barrier only trips when all four subagent turns are inside ``chat`` at
+    once, so a sequential dispatcher fails on its timeout rather than merely
+    being slow. The caller's own turn is told apart by its system prompt, and
+    runs on the REPL thread, so its script needs no locking.
+    """
+    from agentharness import repl
+
+    n = 4
+    barrier = threading.Barrier(n, timeout=TIMEOUT)
+
+    class SpawningProvider(FakeProvider):
+        def chat(self, *, system, messages, tools, max_tokens):
+            if system.startswith("You are a subagent"):
+                barrier.wait()
+                return _text_response(f"answered: {messages[-1].text()}")
+            return super().chat(
+                system=system, messages=messages, tools=tools, max_tokens=max_tokens
+            )
+
+    calls = [(f"c{i}", "spawn_subagent", {"task": f"question {i}"}) for i in range(n)]
+    prov = SpawningProvider([_multi_tool_response(calls), _text_response("all four answered")])
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: prov)
+    h = repl.Harness(
+        Config(skills_dir=str(tmp_path), workspace_dir=str(_ws(tmp_path).root))
+    )
+
+    h.run_prompt("ask four models the same question")
+    out = capsys.readouterr().out
+    for i in range(n):
+        assert f"answered: question {i}" in out
+    # Four subagent states, and the prompt is still pointing where it was.
+    assert len([s for s in h.states if s.name.startswith("subagent-")]) == n
+    assert h.states.active.name == "default"
+
+
+def test_spawn_subagent_max_iterations_leaves_active_untouched(tmp_path, monkeypatch):
     script = [_tool_response("c", "greet", {"name": "X"}) for _ in range(20)]
     h, _ = _spawn_harness(tmp_path, monkeypatch, script, max_tool_iterations=3)
     answer = h._spawn_subagent("loop forever", None, None)
     assert "did not converge" in answer
-    assert h.states.active.name == "default"  # active restored even on failure
+    assert h.states.active.name == "default"  # a failing subagent moves nothing either
 
 
 # ---- usage ------------------------------------------------------------------
@@ -544,7 +803,7 @@ def test_read_only_workspace_hides_write_tools_in_harness(tmp_path, monkeypatch)
 
 def test_effective_system_mentions_the_workspace(tmp_path, monkeypatch):
     h, _ = _harness(tmp_path, monkeypatch)
-    system = h.effective_system()
+    system = h.effective_system(h.states.active)
     assert str(h.workspace.root) in system
     assert "write_file" in system
 
@@ -552,7 +811,15 @@ def test_effective_system_mentions_the_workspace(tmp_path, monkeypatch):
 def test_effective_system_omits_missing_workspace(tmp_path, monkeypatch):
     h, _ = _harness(tmp_path, monkeypatch)
     h.workspace.root.rmdir()
-    assert "workspace directory is available" not in h.effective_system()
+    assert "workspace directory is available" not in h.effective_system(h.states.active)
+
+
+def test_effective_system_uses_the_state_it_is_given(tmp_path, monkeypatch):
+    """Not states.active: with turns in flight there is no single 'current' one."""
+    h, _ = _harness(tmp_path, monkeypatch)
+    other = h.states.new("other", system="OTHER PROMPT", activate=False)
+    assert h.states.active.name == "default"  # activate=False left the prompt alone
+    assert h.effective_system(other).startswith("OTHER PROMPT")
 
 
 # ---- provider aliases -------------------------------------------------------

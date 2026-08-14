@@ -18,6 +18,11 @@ show_thinking: false         # render model reasoning (Anthropic summary / Gemin
 show_usage: true             # one dim token line after each turn; /usage still
                              # shows the running total either way
 max_tool_iterations: 10      # cap on tool round-trips within one turn
+max_concurrency: 8           # tool calls from one assistant message that run at
+                             # once — four spawn_subagent calls cost one round
+                             # trip, not four. Set 1 for sequential dispatch.
+max_jobs: 4                  # background turns at once (a prompt ending in `&`);
+                             # still one in-flight turn per state
 skills_dir: ./skills         # inside the container this is /skills (mounted, read-only)
 workspace_dir: ./workspace   # inside the container this is /workspace (mounted, read-write)
 workspace_writable: true     # false registers only list_dir/read_file — the write
