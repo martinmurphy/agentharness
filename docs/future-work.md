@@ -144,6 +144,36 @@ building a prompt for (subagents are no longer activated), but it still appends
 the workspace paragraph for every state, so a subagent inherits the line written
 for the main conversation.
 
+## Unverified: does the tool description get the model to batch its spawns?
+
+**Problem.** Parallel tool dispatch is per-*message*: `agent.run_turn` runs the
+calls one assistant message carries on a pool. A model that spawns four
+subagents across four messages therefore gets four sequential round-trips, and
+`max_concurrency` never applies — there is never more than one call to run.
+
+Observed on the first real run of the feature. Asked to put one question to
+four backends, the model emitted one `spawn_subagent` per message: five model
+calls instead of two, each subagent finishing before the next was created. The
+concurrency machinery was working correctly and had nothing to do.
+
+There is no request parameter that asks a provider for batching — Anthropic
+offers only `disable_parallel_tool_use`, which forbids it — so the tool
+description is the only lever. `spawn_subagent`'s now says that independent
+tasks belong in one message and run concurrently there.
+
+**Why open.** It is a prompt change, and like the entry above it only a real run
+against a real provider tells you. `tests/test_tools.py` pins the wording so a
+reword cannot silently drop the affordance, but no test can show that a model
+acts on it — a fake provider replays whatever script the test wrote.
+
+**If it doesn't hold.** Escalating levers, narrowest first: a sentence in
+`DEFAULT_SYSTEM_PROMPT` about batching independent tool calls generally (helps
+`web_fetch` and MCP tools too, not just spawns); then reporting the shape back
+to the user, since the failure is currently invisible unless you count the
+`(N calls)` on the usage line — a dim note when a turn made several
+single-call round-trips in a row would name it. Forcing it in the harness is not
+an option: the model decides what one message contains.
+
 ## An ignore list for list_dir
 
 **Problem.** `list_dir(recursive=True)` reports everything. On a Python project

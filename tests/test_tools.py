@@ -236,6 +236,20 @@ def test_spawn_subagent_tool_calls_runner():
     assert seen["args"] == ("do x", "gemini", None)  # model omitted -> None (caller default)
 
 
+def test_spawn_subagent_tool_advertises_batching():
+    """The affordance has to be in the description or the model will not use it.
+
+    Parallel dispatch only pays off when one assistant message carries several
+    calls, and a model asked to consult four backends will otherwise spawn them
+    one at a time — four round-trips, nothing overlapping. Nothing in the API
+    can ask for batching; the description is the only lever. Pinned so a reword
+    cannot quietly drop it.
+    """
+    tool = spawn_subagent_tool(lambda *a: "x", ["anthropic"])
+    assert "one message" in tool.description
+    assert "concurrently" in tool.description
+
+
 def test_spawn_subagent_tool_requires_task():
     reg = ToolRegistry()
     reg.register(spawn_subagent_tool(lambda *a: "x", ["anthropic"]))

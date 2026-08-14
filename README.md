@@ -32,10 +32,10 @@ model.
   path is confined to it.
 - **Multiple states** — independent in-memory conversations, each with its own
   history, system prompt, provider, and model.
-- **Parallel work** — tool calls the model makes in one message run
-  concurrently, so four `spawn_subagent` calls cost one round trip rather than
-  four; and a prompt ending in ` &` runs in the background, leaving the prompt
-  free for another state. See *Background jobs*.
+- **Parallel work** — tool calls the model puts in *one* message run
+  concurrently, so four `spawn_subagent` calls in one message cost one round
+  trip rather than four; and a prompt ending in ` &` runs in the background,
+  leaving the prompt free for another state. See *Background jobs*.
 - **Providers** — Anthropic, the same models through Google Vertex AI, Google
   Gemini (AI Studio), and any OpenAI-compatible endpoint (OpenAI, Ollama, vLLM,
   …). `providers:` is a registry rather than a fixed list of names: a *second*
@@ -158,11 +158,19 @@ transcript neither of them wrote. Concurrency comes from using more states —
 `/switch` or `/new`. `/delete` and `/reset` are refused on a busy state for the
 same reason. `max_jobs` (default 4) caps how many run at once.
 
-Within a single turn, tool calls the model makes in one message run
+Within a single turn, tool calls the model puts in **one message** run
 concurrently, up to `max_concurrency` (default 8); set it to `1` for the old
 sequential dispatch. Results are *rendered* as they land, so you can see
 progress, but recorded in the model's call order, so the transcript replays the
 same way every time.
+
+The "one message" part is the model's choice, not the harness's. A model that
+issues four `spawn_subagent` calls across four messages gets four sequential
+round-trips whatever `max_concurrency` says, because each message only ever
+carried one call — no provider API has a knob that asks for batching. The
+`spawn_subagent` description tells the model to put independent tasks in one
+message; the `(N calls)` count on the `[usage]` line is how you check it did.
+Four subagents batched is 2 calls; spawned one at a time it is 5.
 
 ## Configuration
 
