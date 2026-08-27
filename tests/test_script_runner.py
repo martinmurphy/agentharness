@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
 import textwrap
+import time
 
 import pytest
 
@@ -12,9 +15,12 @@ from agentharness.skills.runner import (
     DEFAULT_MAX_OUTPUT_BYTES,
     ScriptConfigError,
     ScriptPolicy,
+    ScriptResult,
+    ScriptTimeout,
     child_env,
     parse_policy,
     resolve_script,
+    run_script,
 )
 from agentharness.workspace import Workspace
 
@@ -177,3 +183,125 @@ def test_declared_and_permitted_but_unset_is_silently_absent(tmp_path, monkeypat
     skill = _skill(tmp_path, env="GITHUB_TOKEN")
     env = child_env(skill, _ws(tmp_path), _enabled(env_allowlist=frozenset({"GITHUB_TOKEN"})))
     assert "GITHUB_TOKEN" not in env       # the script's own check reports it better
+
+
+def test_runs_and_captures_stdout(tmp_path):
+    skill = _skill(tmp_path, scripts={"scripts/hello.py": """
+        import sys
+        print("hello", *sys.argv[1:])
+    """})
+    result = run_script(skill, "scripts/hello.py", _ws(tmp_path), _enabled(), args=["world"])
+    assert isinstance(result, ScriptResult)
+    assert result.exit_status == 0
+    assert result.stdout.strip() == "hello world"
+    assert result.stderr == ""
+
+
+def test_non_zero_exit_returns_normally(tmp_path):
+    skill = _skill(tmp_path, scripts={"scripts/fail.py": """
+        import sys
+        print("could not parse line 4", file=sys.stderr)
+        sys.exit(3)
+    """})
+    result = run_script(skill, "scripts/fail.py", _ws(tmp_path), _enabled())
+    assert result.exit_status == 3
+    assert "could not parse" in result.stderr
+
+
+def test_stdin_is_passed_through(tmp_path):
+    skill = _skill(tmp_path, scripts={"scripts/echo.py": """
+        import sys
+        sys.stdout.write(sys.stdin.read().upper())
+    """})
+    result = run_script(skill, "scripts/echo.py", _ws(tmp_path), _enabled(), stdin="quiet")
+    assert result.stdout == "QUIET"
+
+
+def test_omitted_stdin_gives_eof_not_a_hang(tmp_path):
+    skill = _skill(tmp_path, scripts={"scripts/echo.py": """
+        import sys
+        print(repr(sys.stdin.read()))
+    """})
+    result = run_script(skill, "scripts/echo.py", _ws(tmp_path), _enabled(), timeout=5)
+    assert result.stdout.strip() == "''"
+
+
+def test_cwd_is_the_workspace_root(tmp_path):
+    skill = _skill(tmp_path, scripts={"scripts/write.py": """
+        from pathlib import Path
+        Path("made-here.txt").write_text("ok", encoding="utf-8")
+        print("done")
+    """})
+    ws = _ws(tmp_path)
+    run_script(skill, "scripts/write.py", ws, _enabled())
+    assert (ws.root / "made-here.txt").read_text(encoding="utf-8") == "ok"
+
+
+def test_output_is_capped(tmp_path):
+    skill = _skill(tmp_path, scripts={"scripts/loud.py": 'print("x" * 5000)\n'})
+    result = run_script(skill, "scripts/loud.py", _ws(tmp_path), _enabled(max_output_bytes=1000))
+    assert len(result.stdout.encode("utf-8")) <= 1000
+    assert result.stdout_dropped > 0
+
+
+def test_arguments_are_never_shell_interpreted(tmp_path):
+    skill = _skill(tmp_path, scripts={"scripts/args.py": """
+        import sys
+        print(sys.argv[1])
+    """})
+    result = run_script(
+        skill, "scripts/args.py", _ws(tmp_path), _enabled(), args=["; echo pwned"]
+    )
+    assert result.stdout.strip() == "; echo pwned"  # one odd string, not a command
+
+
+def test_environment_reaches_the_child(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
+    skill = _skill(tmp_path, scripts={"scripts/dump.py": """
+        import json, os
+        print(json.dumps(dict(os.environ)))
+    """})
+    result = run_script(skill, "scripts/dump.py", _ws(tmp_path), _enabled())
+    env = json.loads(result.stdout)
+    assert "ANTHROPIC_API_KEY" not in env
+    assert env["AGENTHARNESS_SKILL_DIR"] == str(skill.path)
+
+
+def test_disabled_policy_refuses_to_run(tmp_path):
+    skill = _skill(tmp_path, scripts={"scripts/hello.py": 'print("hi")\n'})
+    with pytest.raises(ValueError) as exc:
+        run_script(skill, "scripts/hello.py", _ws(tmp_path), ScriptPolicy())
+    assert "disabled" in str(exc.value)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def test_timeout_kills_the_whole_process_group(tmp_path):
+    """A script that forked must not leave its child running after the timeout.
+
+    subprocess's own timeout kills the direct child only, so this asserts on the
+    grandchild's PID rather than merely on our having stopped waiting.
+    """
+    skill = _skill(tmp_path, scripts={"scripts/forker.py": """
+        import subprocess, sys, time
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        print(child.pid, flush=True)
+        time.sleep(60)
+    """})
+    with pytest.raises(ScriptTimeout) as exc:
+        run_script(skill, "scripts/forker.py", _ws(tmp_path), _enabled(), timeout=1)
+
+    assert exc.value.timeout == 1
+    grandchild = int(exc.value.stdout.strip())   # partial output survived the kill
+    deadline = time.time() + 5                   # reparenting and reaping is not instant
+    while time.time() < deadline and _alive(grandchild):
+        time.sleep(0.05)
+    assert not _alive(grandchild)

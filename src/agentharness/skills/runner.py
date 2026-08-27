@@ -13,6 +13,10 @@ threat model. See docs/plan-skill-scripts.md.
 from __future__ import annotations
 
 import os
+import signal
+import subprocess
+import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -169,3 +173,114 @@ def child_env(skill: Skill, ws: Workspace, policy: ScriptPolicy) -> dict[str, st
         if value is not None:
             env[name] = value
     return env
+
+
+@dataclass(frozen=True)
+class ScriptResult:
+    """One completed run. ``dropped`` counts bytes lost to the output cap."""
+
+    exit_status: int
+    stdout: str
+    stderr: str
+    stdout_dropped: int = 0
+    stderr_dropped: int = 0
+
+
+class ScriptTimeout(ValueError):
+    """A script that outlived its timeout and was killed, with what it had said.
+
+    The partial output travels with the error because that is usually where a
+    hang explains itself.
+    """
+
+    def __init__(self, timeout: int, stdout: str, stderr: str) -> None:
+        super().__init__(f"script exceeded its {timeout}s timeout and was killed")
+        self.timeout = timeout
+        self.stdout = stdout
+        self.stderr = stderr
+
+
+def _truncate(text: str, limit: int) -> tuple[str, int]:
+    """Cut ``text`` to ``limit`` bytes of UTF-8, on a character boundary."""
+    raw = text.encode("utf-8")
+    if len(raw) <= limit:
+        return text, 0
+    kept = raw[:limit].decode("utf-8", errors="ignore")
+    return kept, len(raw) - len(kept.encode("utf-8"))
+
+
+def _kill_group(proc: subprocess.Popen) -> None:
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        proc.kill()
+
+
+def run_script(
+    skill: Skill,
+    rel_path: str,
+    ws: Workspace,
+    policy: ScriptPolicy,
+    *,
+    args: Sequence[str] = (),
+    stdin: str | None = None,
+    timeout: int | None = None,
+) -> ScriptResult:
+    """Run a script bundled with ``skill`` and return what it said.
+
+    A non-zero exit is a *result*, not an exception: a script that exits 2 and
+    explains itself on stderr has told the model something it can act on.
+    Exceptions are for the harness failing to run the thing at all.
+
+    Note the honest limit: a subprocess is not confined by
+    ``workspace.resolve_in``. It can reach any path the container user can. The
+    container is the confinement, which is why only vetted scripts may run.
+    """
+    if not policy.enabled:
+        raise ValueError(
+            "skill scripts are disabled; set skill_scripts.enabled: true in config "
+            "(or AGENTHARNESS_SKILL_SCRIPTS_ENABLED=true) to allow them"
+        )
+    target = resolve_script(skill, rel_path)
+    if not ws.root.is_dir():
+        raise ValueError(f"workspace directory does not exist: {ws.root}")
+    seconds = policy.clamp_timeout(timeout)
+
+    # A list, never shell=True: there is no shell, so there is nothing to inject
+    # into. sys.executable rather than a PATH lookup, so a `python` earlier on
+    # PATH cannot substitute itself. start_new_session gives the child a process
+    # group of its own — subprocess's timeout kills the direct child only, and a
+    # script that forked would otherwise leave orphans holding the pipes open.
+    proc = subprocess.Popen(
+        [sys.executable, str(target), *args],
+        cwd=str(ws.root),
+        env=child_env(skill, ws, policy),
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="replace",  # a script writing non-UTF-8 has a bug; we don't raise
+        start_new_session=True,
+    )
+    try:
+        out, err = proc.communicate(stdin, timeout=seconds)
+    except subprocess.TimeoutExpired:
+        _kill_group(proc)
+        try:
+            out, err = proc.communicate(timeout=5)
+        except subprocess.TimeoutExpired:  # a grandchild escaped the group
+            out, err = "", ""
+        kept_out, _ = _truncate(out or "", policy.max_output_bytes)
+        kept_err, _ = _truncate(err or "", policy.max_output_bytes)
+        raise ScriptTimeout(seconds, kept_out, kept_err) from None
+
+    kept_out, dropped_out = _truncate(out, policy.max_output_bytes)
+    kept_err, dropped_err = _truncate(err, policy.max_output_bytes)
+    return ScriptResult(
+        exit_status=proc.returncode,
+        stdout=kept_out,
+        stderr=kept_err,
+        stdout_dropped=dropped_out,
+        stderr_dropped=dropped_err,
+    )
