@@ -2,15 +2,54 @@
 
 from __future__ import annotations
 
+import textwrap
+
 import pytest
 
 from agentharness.config import Config
+from agentharness.skills.loader import load_skills
 from agentharness.skills.runner import (
     DEFAULT_MAX_OUTPUT_BYTES,
     ScriptConfigError,
     ScriptPolicy,
     parse_policy,
+    resolve_script,
 )
+from agentharness.workspace import Workspace
+
+
+def _skill(tmp_path, *, name="demo", env="", scripts=None):
+    """Build a skill directory and load it through the real loader.
+
+    Going through load_skills rather than constructing a Skill directly is
+    deliberate: script_env then comes from the same parsing path production
+    uses, so a test cannot pass against a shape the loader never produces.
+    """
+    root = tmp_path / "skills"
+    directory = root / name
+    (directory / "scripts").mkdir(parents=True)
+    meta = f'metadata:\n  env: "{env}"\n' if env else ""
+    (directory / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: A demo skill used by tests.\n{meta}---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    for rel, source in (scripts or {}).items():
+        path = directory / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(textwrap.dedent(source).lstrip(), encoding="utf-8")
+    skill = load_skills(root).by_name(name)
+    assert skill is not None
+    return skill
+
+
+def _ws(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir(exist_ok=True)
+    return Workspace(root=root, writable=True)
+
+
+def _enabled(**kwargs):
+    return ScriptPolicy(enabled=True, **kwargs)
 
 
 def test_policy_defaults_to_disabled(monkeypatch):
@@ -68,3 +107,39 @@ def test_clamp_timeout():
         policy.clamp_timeout("30")
     with pytest.raises(ValueError):
         policy.clamp_timeout(True)                # bool is an int; not a timeout
+
+
+def test_resolves_a_script_under_scripts(tmp_path):
+    skill = _skill(tmp_path, scripts={"scripts/ok.py": "print('hi')\n"})
+    assert resolve_script(skill, "scripts/ok.py").name == "ok.py"
+
+
+@pytest.mark.parametrize("rel_path, fragment", [
+    ("scripts/../../escape.py", "scripts/"),
+    ("/etc/passwd", "scripts/"),
+    ("references/REGIONAL.md", "scripts/"),
+    ("notes.py", "scripts/"),
+    ("scripts/notes.txt", "only .py"),
+    ("scripts/missing.py", "no such script"),
+])
+def test_rejects(tmp_path, rel_path, fragment):
+    skill = _skill(tmp_path, scripts={
+        "scripts/ok.py": "print('hi')\n",
+        "scripts/notes.txt": "not a script\n",
+        "references/REGIONAL.md": "docs\n",
+        "notes.py": "print('top level')\n",
+    })
+    (tmp_path / "skills" / "escape.py").write_text("print('nope')\n", encoding="utf-8")
+    with pytest.raises(ValueError) as exc:
+        resolve_script(skill, rel_path)
+    assert fragment in str(exc.value)
+
+
+def test_symlink_out_of_scripts_is_rejected(tmp_path):
+    skill = _skill(tmp_path, scripts={"scripts/ok.py": "print('hi')\n"})
+    outside = tmp_path / "outside.py"
+    outside.write_text("print('nope')\n", encoding="utf-8")
+    link = skill.path / "scripts" / "link.py"
+    link.symlink_to(outside)
+    with pytest.raises(ValueError):
+        resolve_script(skill, "scripts/link.py")

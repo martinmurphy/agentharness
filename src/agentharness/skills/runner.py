@@ -14,10 +14,11 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from agentharness.config import Config, as_bool
-from agentharness.skills.model import ENV_NAME_RE
+from agentharness.skills.model import ENV_NAME_RE, Skill
 
 DEFAULT_TIMEOUT = 30
 DEFAULT_MAX_TIMEOUT = 120
@@ -114,3 +115,28 @@ def parse_policy(config: Config) -> ScriptPolicy:
         max_output_bytes=_positive_int(block, "max_output_bytes", DEFAULT_MAX_OUTPUT_BYTES),
         env_allowlist=frozenset(raw_allowlist),
     )
+
+
+def resolve_script(skill: Skill, rel_path: str) -> Path:
+    """Resolve a runnable script inside a skill, refusing anything else.
+
+    Resolving against ``scripts/`` rather than the skill root is strictly
+    tighter than ``read_skill_file`` and subsumes its escape check: ``..``,
+    absolute paths, and symlink escapes all fail the one ``is_relative_to``.
+    The rule it leaves is a sentence a skill author can hold in their head —
+    references/ is read, scripts/ is run — so a skill cannot be talked into
+    executing its own documentation.
+    """
+    if not isinstance(rel_path, str) or not rel_path:
+        raise ValueError("'path' is required and must be a non-empty string")
+    base = (skill.path / "scripts").resolve()
+    target = (skill.path / rel_path).resolve()
+    if not target.is_relative_to(base):
+        raise ValueError(
+            f"path {rel_path!r} is not under the skill's scripts/ directory"
+        )
+    if target.suffix != ".py":
+        raise ValueError(f"only .py files can be run: {rel_path}")
+    if not target.is_file():
+        raise ValueError(f"no such script: {rel_path}")
+    return target
