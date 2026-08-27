@@ -12,6 +12,7 @@ from agentharness.skills.runner import (
     DEFAULT_MAX_OUTPUT_BYTES,
     ScriptConfigError,
     ScriptPolicy,
+    child_env,
     parse_policy,
     resolve_script,
 )
@@ -143,3 +144,36 @@ def test_symlink_out_of_scripts_is_rejected(tmp_path):
     link.symlink_to(outside)
     with pytest.raises(ValueError):
         resolve_script(skill, "scripts/link.py")
+
+
+def test_child_env_is_built_not_inherited(tmp_path, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
+    monkeypatch.setenv("SOME_OTHER_VAR", "leak")
+    skill = _skill(tmp_path)
+    ws = _ws(tmp_path)
+    env = child_env(skill, ws, _enabled())
+    assert "ANTHROPIC_API_KEY" not in env
+    assert "SOME_OTHER_VAR" not in env
+    assert env["AGENTHARNESS_WORKSPACE_DIR"] == str(ws.root)
+    assert env["AGENTHARNESS_SKILL_DIR"] == str(skill.path)
+    assert env["PYTHONDONTWRITEBYTECODE"] == "1"
+    assert env["PYTHONIOENCODING"] == "utf-8"
+
+
+def test_env_forwarded_only_when_declared_and_permitted(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITHUB_TOKEN", "gh-1")
+    monkeypatch.setenv("JIRA_TOKEN", "jira-1")
+    monkeypatch.setenv("SLACK_TOKEN", "slack-1")
+    skill = _skill(tmp_path, env="GITHUB_TOKEN JIRA_TOKEN")
+    policy = _enabled(env_allowlist=frozenset({"GITHUB_TOKEN", "SLACK_TOKEN"}))
+    env = child_env(skill, _ws(tmp_path), policy)
+    assert env["GITHUB_TOKEN"] == "gh-1"   # declared and permitted
+    assert "JIRA_TOKEN" not in env         # declared, not permitted
+    assert "SLACK_TOKEN" not in env        # permitted, not declared
+
+
+def test_declared_and_permitted_but_unset_is_silently_absent(tmp_path, monkeypatch):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    skill = _skill(tmp_path, env="GITHUB_TOKEN")
+    env = child_env(skill, _ws(tmp_path), _enabled(env_allowlist=frozenset({"GITHUB_TOKEN"})))
+    assert "GITHUB_TOKEN" not in env       # the script's own check reports it better

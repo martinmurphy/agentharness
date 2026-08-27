@@ -19,6 +19,7 @@ from typing import Any
 
 from agentharness.config import Config, as_bool
 from agentharness.skills.model import ENV_NAME_RE, Skill
+from agentharness.workspace import Workspace
 
 DEFAULT_TIMEOUT = 30
 DEFAULT_MAX_TIMEOUT = 120
@@ -140,3 +141,31 @@ def resolve_script(skill: Skill, rel_path: str) -> Path:
     if not target.is_file():
         raise ValueError(f"no such script: {rel_path}")
     return target
+
+
+def child_env(skill: Skill, ws: Workspace, policy: ScriptPolicy) -> dict[str, str]:
+    """The environment a script runs with: built from empty, never inherited.
+
+    A script's stdout goes straight back into the model's context, so an
+    inherited ANTHROPIC_API_KEY would be one ``print(os.environ)`` away from the
+    transcript. What a skill declares is a *request*; what it gets is the
+    intersection with the operator's allowlist, because skills are bind-mounted
+    and may come from anywhere.
+
+    PYTHONDONTWRITEBYTECODE earns its place: /skills is mounted read-only, and a
+    __pycache__ write that silently fails on every run is noise nobody will chase.
+    """
+    env = {
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": os.environ.get("HOME", str(ws.root)),
+        "LANG": "C.UTF-8",
+        "PYTHONIOENCODING": "utf-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "AGENTHARNESS_WORKSPACE_DIR": str(ws.root),
+        "AGENTHARNESS_SKILL_DIR": str(skill.path),
+    }
+    for name in sorted(skill.script_env & policy.env_allowlist):
+        value = os.environ.get(name)
+        if value is not None:
+            env[name] = value
+    return env
