@@ -269,8 +269,20 @@ def run_script(
         _kill_group(proc)
         try:
             out, err = proc.communicate(timeout=5)
-        except subprocess.TimeoutExpired:  # a grandchild escaped the group
-            out, err = "", ""
+        except subprocess.TimeoutExpired as escaped:
+            # A grandchild escaped the group: the pipes never drained, so
+            # communicate() never got to decode or close them itself. CPython
+            # still hands back whatever it had already buffered (as raw
+            # bytes, since decoding happens only on a clean return) — that is
+            # worth keeping, since this is the case where a hang most needs
+            # explaining. Close the pipes and reap what we can so a dangling
+            # Popen doesn't warn on GC.
+            out = (escaped.stdout or b"").decode("utf-8", errors="replace")
+            err = (escaped.stderr or b"").decode("utf-8", errors="replace")
+            for pipe in (proc.stdin, proc.stdout, proc.stderr):
+                if pipe is not None:
+                    pipe.close()
+            proc.poll()
         kept_out, _ = _truncate(out or "", policy.max_output_bytes)
         kept_err, _ = _truncate(err or "", policy.max_output_bytes)
         raise ScriptTimeout(seconds, kept_out, kept_err) from None

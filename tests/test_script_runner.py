@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import textwrap
 import time
 
@@ -244,6 +245,21 @@ def test_output_is_capped(tmp_path):
     assert result.stdout_dropped > 0
 
 
+def test_output_cap_lands_on_a_character_boundary(tmp_path):
+    """``test_output_is_capped`` uses pure ASCII, so it would also pass a naive
+    character-slice (``text[:limit]``) implementation and a naive dropped count
+    of ``len(raw) - limit``. Multi-byte content whose cutoff falls mid-character
+    pins the actual byte-boundary requirement: "e"-acute is two UTF-8 bytes, so a
+    five-byte cap keeps two whole characters (four bytes) and drops the dangling
+    lead byte of the third along with everything after it.
+    """
+    skill = _skill(tmp_path, scripts={"scripts/loud.py": 'print("\\u00e9" * 10, end="")\n'})
+    result = run_script(skill, "scripts/loud.py", _ws(tmp_path), _enabled(max_output_bytes=5))
+    assert result.stdout == "éé"
+    assert len(result.stdout.encode("utf-8")) <= 5
+    assert result.stdout_dropped == 16  # 20 bytes total, minus the 4 kept
+
+
 def test_arguments_are_never_shell_interpreted(tmp_path):
     skill = _skill(tmp_path, scripts={"scripts/args.py": """
         import sys
@@ -305,3 +321,43 @@ def test_timeout_kills_the_whole_process_group(tmp_path):
     while time.time() < deadline and _alive(grandchild):
         time.sleep(0.05)
     assert not _alive(grandchild)
+
+
+def test_escaped_grandchild_output_is_recovered_not_discarded(tmp_path, monkeypatch):
+    """The rescue ``communicate(timeout=5)`` after the kill can itself time out,
+    if a grandchild escaped the process group and is still holding the pipes
+    open. Reaching that for real needs a grandchild that calls ``setsid()``
+    itself to escape — a race that would make the test flaky. Faking both
+    ``communicate()`` calls pins the same code path deterministically: CPython's
+    own ``TimeoutExpired`` carries whatever it had already buffered, and that
+    must survive (capped, like every other path) rather than being thrown away
+    for empty strings, and the pipes must still get closed so a dangling
+    ``Popen`` doesn't warn on garbage collection.
+    """
+    seen = []
+
+    def fake_communicate(self, input=None, timeout=None):
+        seen.append(self)
+        if len(seen) == 1:
+            raise subprocess.TimeoutExpired(cmd=["x"], timeout=timeout)
+        raise subprocess.TimeoutExpired(
+            cmd=["x"], timeout=timeout, output=b"partial stdout", stderr=b"partial stderr"
+        )
+
+    monkeypatch.setattr(subprocess.Popen, "communicate", fake_communicate)
+    monkeypatch.setattr("agentharness.skills.runner._kill_group", lambda proc: None)
+
+    skill = _skill(tmp_path, scripts={"scripts/hello.py": 'print("hi")\n'})
+    with pytest.raises(ScriptTimeout) as exc:
+        run_script(
+            skill, "scripts/hello.py", _ws(tmp_path), _enabled(max_output_bytes=5), timeout=1
+        )
+
+    # Capped, not the raw buffered text -- this path goes through _truncate too.
+    assert exc.value.stdout == "parti"
+    assert exc.value.stderr == "parti"
+
+    proc = seen[-1]
+    assert proc.stdin.closed
+    assert proc.stdout.closed
+    assert proc.stderr.closed
