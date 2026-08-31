@@ -16,6 +16,7 @@ from agentharness.providers.base import (
     Usage,
 )
 from agentharness.skills.loader import load_skills
+from agentharness.skills.runner import ScriptPolicy
 from agentharness.state import StateManager
 from agentharness.tools.registry import Tool, ToolRegistry, build_default_registry
 from agentharness.workspace import Workspace
@@ -1153,3 +1154,50 @@ def test_turn_usage_reported_when_max_iterations_hit(tmp_path, monkeypatch, caps
     out = capsys.readouterr().out
     assert "[stopped]" in out
     assert "(2 calls)" in out
+
+
+def test_script_tool_absent_by_default(tmp_path):
+    registry = build_default_registry(load_skills(tmp_path), _ws(tmp_path))
+    assert "run_skill_script" not in registry
+
+
+def test_script_tool_registered_when_policy_enabled(tmp_path):
+    registry = build_default_registry(
+        load_skills(tmp_path), _ws(tmp_path), None, ScriptPolicy(enabled=True)
+    )
+    assert "run_skill_script" in registry
+
+
+def _skill_with_script(tmp_path):
+    directory = tmp_path / "demo"
+    (directory / "scripts").mkdir(parents=True)
+    (directory / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: A demo skill used by tests.\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    (directory / "scripts" / "run.py").write_text('print("hi")\n', encoding="utf-8")
+
+
+def test_harness_registers_the_script_tool_when_enabled(tmp_path, monkeypatch):
+    from agentharness import repl
+
+    _skill_with_script(tmp_path)
+    monkeypatch.setenv("AGENTHARNESS_SKILL_SCRIPTS_ENABLED", "true")
+    provider = FakeProvider([])
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: provider)
+    h = repl.Harness(Config(skills_dir=str(tmp_path), workspace_dir=str(_ws(tmp_path).root)))
+    assert "run_skill_script" in h.registry
+    assert "run_skill_script" in h._subagent_registry   # subagents share the workspace
+    assert "run_skill_script" in h.effective_system(h.states.active)
+
+
+def test_harness_omits_the_script_tool_and_its_prompt_line(tmp_path, monkeypatch):
+    from agentharness import repl
+
+    _skill_with_script(tmp_path)
+    monkeypatch.delenv("AGENTHARNESS_SKILL_SCRIPTS_ENABLED", raising=False)
+    provider = FakeProvider([])
+    monkeypatch.setattr(repl, "build_provider", lambda name, model, config: provider)
+    h = repl.Harness(Config(skills_dir=str(tmp_path), workspace_dir=str(_ws(tmp_path).root)))
+    assert "run_skill_script" not in h.registry
+    assert "run_skill_script" not in h.effective_system(h.states.active)

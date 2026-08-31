@@ -198,8 +198,8 @@ class ScriptTimeout(ValueError):
         timeout: int,
         stdout: str,
         stderr: str,
-        stdout_dropped: int = 0,
-        stderr_dropped: int = 0,
+        stdout_dropped: int,
+        stderr_dropped: int,
     ) -> None:
         super().__init__(f"script exceeded its {timeout}s timeout and was killed")
         self.timeout = timeout

@@ -36,6 +36,7 @@ from agentharness.providers.factory import (
     resolve_model,
 )
 from agentharness.skills.loader import SkillSet, load_skills
+from agentharness.skills.runner import parse_policy
 from agentharness.state import ConversationState, StateManager
 from agentharness.tools.mcp_tools import make_mcp_tools
 from agentharness.tools.model_tools import list_models_tool
@@ -170,6 +171,9 @@ class Harness:
             root=Path(config.workspace_dir).expanduser(),
             writable=config.workspace_writable,
         )
+        # Parsed once, here, so a malformed skill_scripts block fails at startup
+        # naming the key rather than inside a tool call ten minutes later.
+        self.script_policy = parse_policy(config)
         self.ansi = _Ansi(sys.stdout.isatty())
         # Connect MCP servers before building the registry: their tools have to
         # be known before the first turn advertises the tool list to the model.
@@ -241,7 +245,9 @@ class Harness:
         them too — they already share the workspace, and a delegated task that
         cannot reach the same servers as its caller would be a trap.
         """
-        registry = build_default_registry(self.skillset, self.workspace, self.config)
+        registry = build_default_registry(
+            self.skillset, self.workspace, self.config, self.script_policy
+        )
         for tool in make_mcp_tools(self.mcp):
             registry.register(tool)
         registry.register(
@@ -351,6 +357,13 @@ class Harness:
             parts.append(
                 f"A workspace directory is available at {self.workspace.root}. "
                 f"Use {verbs}; paths are relative to its root."
+            )
+        if self.script_policy.enabled and self.skillset.skills:
+            parts.append(
+                "A skill may bundle Python scripts under its scripts/ directory. "
+                "Run one with run_skill_script rather than reimplementing what it "
+                "does; the skill's instructions say which script to use and what "
+                "arguments it takes."
             )
         return "\n\n".join(parts)
 
