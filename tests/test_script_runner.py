@@ -221,6 +221,37 @@ def test_ordinary_real_scripts_directory_still_works(tmp_path):
     assert resolve_script(skill, "scripts/ok.py").name == "ok.py"
 
 
+def test_skill_directory_itself_symlinked_into_skills_root_still_works(tmp_path):
+    """A normal operator layout, distinct from the skill's own scripts/ being
+    a symlink: the *skill directory entry* in the skills root is a symlink to
+    a real directory kept elsewhere (a shared checkout, a registry cache),
+    with an ordinary real scripts/ inside it.
+
+    This does not fail against the current fix — skill.path.resolve() and
+    (skill.path / "scripts").resolve() both follow the same symlink
+    consistently, so the containment check still holds. It is here so that an
+    over-tightening of item 1's fix (e.g. refusing whenever skill.path itself
+    is a symlink, rather than specifically when scripts/ escapes it) would be
+    caught rather than shipped with the suite green.
+    """
+    real_dir = tmp_path / "elsewhere" / "demo"
+    (real_dir / "scripts").mkdir(parents=True)
+    (real_dir / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: A demo skill kept elsewhere.\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    (real_dir / "scripts" / "ok.py").write_text("print('hi')\n", encoding="utf-8")
+
+    skills_root = tmp_path / "skills"
+    skills_root.mkdir()
+    (skills_root / "demo").symlink_to(real_dir, target_is_directory=True)
+
+    skill = load_skills(skills_root).by_name("demo")
+    assert skill is not None
+    assert skill.path.is_symlink()
+    assert resolve_script(skill, "scripts/ok.py").name == "ok.py"
+
+
 def test_child_env_is_built_not_inherited(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
     monkeypatch.setenv("SOME_OTHER_VAR", "leak")

@@ -215,10 +215,16 @@ def test_the_bundled_skills_directory_actually_loads():
     every load_skills call elsewhere here uses a synthetic tmp_path fixture.
     This branch ships skills/word-frequency/ into the repo, so a malformed
     SKILL.md there (or in any bundled skill) would otherwise pass CI green.
+
+    load_skills silently *skips* a directory with no SKILL.md rather than
+    recording an error for it (see load_skills's for-loop: "if not
+    skill_md.is_file(): continue"), so "no errors" alone would not notice a
+    bundled skill that lost its SKILL.md entirely. Assert both shipped
+    skills are present by name, not just that loading was error-free.
     """
     result = load_skills(REPO_SKILLS_DIR)
     assert not result.errors, [(e.path, e.reason) for e in result.errors]
-    assert result.by_name("word-frequency") is not None
+    assert {s.name for s in result.skills} >= {"word-frequency", "greeting-etiquette"}
 
     skill = result.by_name("word-frequency")
     script = resolve_script(skill, "scripts/wordfreq.py")

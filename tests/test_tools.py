@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import textwrap
 
 import pytest
@@ -790,7 +791,12 @@ def test_no_route_lets_the_model_run_its_own_code(tmp_path):
       `scripts` symlink used to make every file under it pass)
 
     Every route must come back as a tool error, and the marker text the
-    planted script would print if it ran must never appear in any result.
+    planted script would print if it ran must never appear in any result. A
+    positive control (the skill's own legitimate script) is dispatched first,
+    so the test can't pass vacuously against a fixture that's silently broken
+    (e.g. every route erroring out with "unknown skill" because skill loading
+    regressed, which would still satisfy "is_error and no marker" while
+    proving nothing about the resolution logic).
     """
     marker = "MODEL AUTHORED CODE RAN"
     ws = _ws(tmp_path)
@@ -823,7 +829,19 @@ def test_no_route_lets_the_model_run_its_own_code(tmp_path):
     reg = build_default_registry(skillset, ws, policy=policy)
     assert "run_skill_script" in reg
 
-    import os
+    # Positive control, dispatched before the negative routes below: if this
+    # fails, the fixture itself is broken (skill loading regressed, the
+    # policy didn't take, the registry wiring changed) and that is what
+    # should be reported — not a false "the invariant holds" from every
+    # negative route coincidentally erroring out for an unrelated reason
+    # (e.g. "unknown skill" if load_skills silently dropped "normal").
+    legit = reg.dispatch(ToolCall(
+        id="route-legit",
+        name="run_skill_script",
+        arguments={"skill": "normal", "path": "scripts/run.py"},
+    ))
+    assert not legit.is_error, f"the control route itself failed: {legit.content!r}"
+    assert "hi" in legit.content
 
     # rel_path is joined onto skill.path (resolve_script does skill.path /
     # rel_path), so a ".." escape written from scripts/ needs that prefix to
