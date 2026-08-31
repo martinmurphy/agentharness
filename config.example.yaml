@@ -28,6 +28,21 @@ workspace_dir: ./workspace   # inside the container this is /workspace (mounted,
 workspace_writable: true     # false registers only list_dir/read_file — the write
                              # tools are not advertised to the model at all
 
+# Skill scripts: whether the model may RUN a .py file bundled under a loaded
+# skill's scripts/ directory (never code it wrote itself — the workspace is not
+# executable). Off by default: with `enabled: false` the run_skill_script tool
+# is not registered at all, so the model is never offered it.
+skill_scripts:
+  enabled: false             # AGENTHARNESS_SKILL_SCRIPTS_ENABLED=true also flips this
+  default_timeout: 30        # seconds, when the model names none
+  max_timeout: 120           # a model-supplied timeout is clamped to this
+  max_output_bytes: 65536    # per stream; the rest is truncated with a marker
+  # A script's environment is built from empty — no API key reaches it. A skill
+  # asks for variables in its frontmatter (`metadata.env`); it gets only those
+  # also named here. Both halves are required, so a downloaded skill cannot help
+  # itself to a token by asking.
+  env_allowlist: []
+
 # system_prompt: |
 #   You are a helpful assistant running inside agentharness.
 

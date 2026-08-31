@@ -32,7 +32,7 @@ Decisions taken up front (from the design questions):
 |---|---|
 | Skill exposure | Catalog in system prompt + `read_skill` / `read_skill_file` tools (spec's 3-stage progressive disclosure) |
 | State persistence | **In-memory only** — states live for the life of the REPL process |
-| Skill `scripts/` | **Read as text, never executed** in v1 |
+| Skill `scripts/` | Read as text; **run** via `run_skill_script` behind `skill_scripts.enabled`, default off (v2) |
 | Providers | `Provider` protocol + **Anthropic and OpenAI-compatible** implementations |
 
 ### Verified environment facts
@@ -220,6 +220,7 @@ rather than emitting binary into the context.
 | `greet` | `name: str, style: "formal" \| "casual" \| "enthusiastic" = "casual"` | a greeting string |
 | `read_skill` | `name: str` | full `SKILL.md` body, frontmatter stripped |
 | `read_skill_file` | `skill: str, path: str` | UTF-8 text of a bundled file under the skill dir |
+| `run_skill_script` | `skill: str, path: str, args: list[str], stdin: str, timeout: int` | exit status, stdout, and stderr of a `.py` under the skill's `scripts/` |
 
 `greet` exists only to prove the loop end-to-end; keep it trivial.
 

@@ -299,3 +299,10 @@ New `tests/test_script_runner.py`, over a temporary skills tree:
 - an invalid `metadata.env` name yields a `SkillLoadError` and leaves other skills loaded
 - output truncation at the cap, and `cwd` being the workspace root
 - disabled policy registers no tool
+
+---
+
+## Status: implemented
+
+The suite passes, ruff is clean, and the bundled `word-frequency` skill runs
+end to end in the container with `skill_scripts.enabled: true`.
