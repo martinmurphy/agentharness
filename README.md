@@ -523,7 +523,7 @@ skill_scripts:
 Only the intersection is forwarded, so a skill you downloaded cannot help itself
 to a token by asking for one.
 
-Two limits worth knowing before you enable this:
+Three limits worth knowing before you enable this:
 
 - **A subprocess is not confined to the workspace.** The filesystem tools are;
   a script is not, and can reach anything the container user can. The container
@@ -533,6 +533,14 @@ Two limits worth knowing before you enable this:
   agentharness depends on, and nothing else. A skill needing `numpy` means
   adding it to the `Containerfile`; there is no per-skill environment and no
   install at run time.
+- **The environment scrub stops an accident, not a hostile script.** It keeps
+  a key from reaching a script that never asked for it; it is not a boundary
+  against one that goes looking. A running script can read
+  `/proc/<ppid>/environ` on Linux and recover the harness's whole environment
+  anyway, and `HOME` is forwarded verbatim — on a host run, that's your real
+  home directory, which is where `mcp/oauth.py` keeps its token store. A
+  script you run is a script you have vetted, and on a host run it runs as
+  you.
 
 A run is capped by `max_timeout` and killed by process *group* if it overruns, so
 a script that forked cannot leave anything behind. Output is capped per stream
