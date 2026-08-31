@@ -134,7 +134,22 @@ def resolve_script(skill: Skill, rel_path: str) -> Path:
     """
     if not isinstance(rel_path, str) or not rel_path:
         raise ValueError("'path' is required and must be a non-empty string")
+    skill_root = skill.path.resolve()
     base = (skill.path / "scripts").resolve()
+    # base must itself be checked against skill_root before it is trusted as a
+    # containment boundary. ``.resolve()`` follows symlinks on BOTH sides of
+    # the is_relative_to check below, so if ``scripts`` itself is a symlink
+    # (e.g. a skill directory containing `scripts -> /workspace`), base
+    # resolves to wherever that symlink points, and every target under it
+    # would then pass the check even though nothing about it is actually
+    # inside the skill directory. A symlink placed AT scripts/foo.py is
+    # already caught by the check below; a symlink placed AT scripts itself
+    # is not, unless this containment check runs first.
+    if not base.is_relative_to(skill_root):
+        raise ValueError(
+            f"skill {skill.name!r}: its scripts/ directory escapes the skill "
+            "directory"
+        )
     target = (skill.path / rel_path).resolve()
     if not target.is_relative_to(base):
         raise ValueError(

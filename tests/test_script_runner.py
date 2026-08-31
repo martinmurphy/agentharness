@@ -153,6 +153,71 @@ def test_symlink_out_of_scripts_is_rejected(tmp_path):
         resolve_script(skill, "scripts/link.py")
 
 
+def test_scripts_directory_itself_a_symlink_out_is_rejected(tmp_path):
+    """`scripts` itself as a symlink out of the skill directory must be refused.
+
+    ``.resolve()`` follows symlinks on both the base and the target, so if
+    ``scripts`` is a symlink pointing elsewhere, the base resolves to that
+    elsewhere and every file under it passes the plain ``is_relative_to``
+    check — even though none of it is inside the skill directory. This is
+    the asymmetry: a symlink AT ``scripts/link.py`` is refused (the test
+    above), but a symlink AT ``scripts`` itself was, before the fix, honoured.
+    """
+    skill = _skill(tmp_path, name="linked")
+    outside = tmp_path / "outside-scripts"
+    outside.mkdir()
+    (outside / "evil.py").write_text("print('nope')\n", encoding="utf-8")
+    scripts_dir = skill.path / "scripts"
+    scripts_dir.rmdir()
+    scripts_dir.symlink_to(outside)
+    with pytest.raises(ValueError, match="escapes the skill"):
+        resolve_script(skill, "scripts/evil.py")
+
+
+def test_scripts_symlink_at_the_workspace_is_rejected(tmp_path):
+    """The headline case from the review: a skill whose scripts/ is a symlink
+    into the workspace directory must not let a model-authored file run.
+
+    Reproduced directly (not through run_script) so this pins resolve_script's
+    contract; the end-to-end route through the real ToolRegistry is covered
+    separately in tests/test_tools.py.
+    """
+    skill = _skill(tmp_path, name="linked")
+    ws = _ws(tmp_path)
+    (ws.root / "evil.py").write_text(
+        "print('MODEL AUTHORED CODE RAN')\n", encoding="utf-8"
+    )
+    scripts_dir = skill.path / "scripts"
+    scripts_dir.rmdir()
+    scripts_dir.symlink_to(ws.root)
+    with pytest.raises(ValueError, match="escapes the skill"):
+        resolve_script(skill, "scripts/evil.py")
+
+
+def test_scripts_symlink_staying_inside_the_skill_still_works(tmp_path):
+    """The fix must not be over-broad: a `scripts` symlink is fine as long as
+    it stays inside the skill's own directory — e.g. a skill author who keeps
+    the real directory elsewhere in the bundle and links it in.
+    """
+    skill = _skill(tmp_path, name="relocated")
+    real_scripts = skill.path / "actual-scripts"
+    real_scripts.mkdir()
+    (real_scripts / "ok.py").write_text("print('hi')\n", encoding="utf-8")
+    scripts_dir = skill.path / "scripts"
+    scripts_dir.rmdir()
+    scripts_dir.symlink_to(real_scripts)
+    assert resolve_script(skill, "scripts/ok.py").name == "ok.py"
+
+
+def test_ordinary_real_scripts_directory_still_works(tmp_path):
+    """Regression guard: the common case, a real (non-symlink) scripts/
+    directory, must be unaffected by the new containment check.
+    """
+    skill = _skill(tmp_path, scripts={"scripts/ok.py": "print('hi')\n"})
+    assert not (skill.path / "scripts").is_symlink()
+    assert resolve_script(skill, "scripts/ok.py").name == "ok.py"
+
+
 def test_child_env_is_built_not_inherited(tmp_path, monkeypatch):
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
     monkeypatch.setenv("SOME_OTHER_VAR", "leak")

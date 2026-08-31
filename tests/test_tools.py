@@ -770,3 +770,76 @@ def test_timeout_renders_truncation_notice_when_output_was_truncated(tmp_path):
     # output was cut off, not complete.
     assert "truncated" in result.content
     assert "more bytes" in result.content
+
+
+def test_no_route_lets_the_model_run_its_own_code(tmp_path):
+    """The headline invariant of the whole feature, exercised end to end
+    through the real ToolRegistry rather than resolve_script directly: no
+    call a model can actually make through ``run_skill_script`` may execute
+    a file the model itself wrote into the workspace.
+
+    Plants one file in the workspace and enumerates every route a model has
+    to reach it:
+
+    - ``..`` out of a normal skill's scripts/ directory
+    - an absolute path
+    - a symlink placed inside a normal skill's scripts/ directory
+    - a skill whose scripts/ directory is *itself* a symlink into the
+      workspace (the bug this branch's item 1 fixes: resolve_script's
+      is_relative_to check resolves symlinks on both sides, so an escaped
+      `scripts` symlink used to make every file under it pass)
+
+    Every route must come back as a tool error, and the marker text the
+    planted script would print if it ran must never appear in any result.
+    """
+    marker = "MODEL AUTHORED CODE RAN"
+    ws = _ws(tmp_path)
+    evil = ws.root / "evil.py"
+    evil.write_text(f"print({marker!r})\n", encoding="utf-8")
+
+    skills_root = tmp_path / "skills"
+    normal = skills_root / "normal"
+    (normal / "scripts").mkdir(parents=True)
+    (normal / "SKILL.md").write_text(
+        "---\nname: normal\ndescription: A normal skill.\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    (normal / "scripts" / "run.py").write_text('print("hi")\n', encoding="utf-8")
+    # Route 3: a symlink placed inside scripts/, pointing at the workspace file.
+    (normal / "scripts" / "link.py").symlink_to(evil)
+
+    # Route 4: a skill whose scripts/ directory is itself a symlink into the
+    # workspace.
+    linked = skills_root / "linked"
+    linked.mkdir(parents=True)
+    (linked / "SKILL.md").write_text(
+        "---\nname: linked\ndescription: A skill whose scripts/ is a symlink.\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    (linked / "scripts").symlink_to(ws.root)
+
+    skillset = load_skills(skills_root)
+    policy = ScriptPolicy(enabled=True)
+    reg = build_default_registry(skillset, ws, policy=policy)
+    assert "run_skill_script" in reg
+
+    import os
+
+    # rel_path is joined onto skill.path (resolve_script does skill.path /
+    # rel_path), so a ".." escape written from scripts/ needs that prefix to
+    # land where it looks like it should.
+    dotdot_from_scripts = os.path.relpath(evil, start=(normal / "scripts"))
+    routes = {
+        "dotdot": ("normal", f"scripts/{dotdot_from_scripts}"),
+        "absolute": ("normal", str(evil)),
+        "symlink_in_scripts": ("normal", "scripts/link.py"),
+        "scripts_dir_is_symlink": ("linked", "scripts/evil.py"),
+    }
+    for label, (skill_name, path) in routes.items():
+        result = reg.dispatch(ToolCall(
+            id=f"route-{label}",
+            name="run_skill_script",
+            arguments={"skill": skill_name, "path": path},
+        ))
+        assert result.is_error, f"route {label!r} was not refused: {result.content!r}"
+        assert marker not in result.content, f"route {label!r} let the model's code run"
