@@ -32,7 +32,7 @@ Decisions taken up front (from the design questions):
 |---|---|
 | Skill exposure | Catalog in system prompt + `read_skill` / `read_skill_file` tools (spec's 3-stage progressive disclosure) |
 | State persistence | **In-memory only** — states live for the life of the REPL process |
-| Skill `scripts/` | Read as text; **run** via `run_skill_script` behind `skill_scripts.enabled`, default off (v2) |
+| Skill `scripts/` | Read as text; **run** via `run_skill_script` behind `skill_scripts.enabled`, default off |
 | Providers | `Provider` protocol + **Anthropic and OpenAI-compatible** implementations |
 
 ### Verified environment facts

@@ -15,8 +15,8 @@ model.
   everything else.
 - **Tools** — model-callable functions in a registry: `greet` (a trivial
   example that proves the loop), `read_skill` / `read_skill_file` (Agent Skills
-  progressive disclosure), `run_skill_script` (run a skill's bundled Python, off by default),
-  `list_dir` / `read_file` / `write_file` / `make_dir`
+  progressive disclosure), `run_skill_script` (run a skill's bundled Python,
+  off by default), `list_dir` / `read_file` / `write_file` / `make_dir`
   (the workspace directory), `web_search` / `web_fetch` (find and read web
   pages), `list_providers` / `list_models` (discover configured providers and
   their models), and `spawn_subagent` (delegate to a nested agent). See
@@ -578,7 +578,10 @@ and truncated with a marker.
   task per server), `manager.py` owns the connections and decides tool identity,
   and `oauth.py` supplies token storage and the browser leg.
 - **Add a skill** — create `skills/<name>/SKILL.md` with `name` (matching the
-  directory) and `description` frontmatter. Optional `references/` and `assets/` files are read as text via `read_skill_file`; `scripts/` are read the same way and, with `skill_scripts.enabled`, run with `run_skill_script` (see *Skill scripts*). Run `/reload`.
+  directory) and `description` frontmatter. Optional `references/` and
+  `assets/` files are read as text via `read_skill_file`; `scripts/` are read
+  the same way and, with `skill_scripts.enabled`, run with `run_skill_script`
+  (see *Skill scripts*). Run `/reload`.
 - **Add a provider** — for another endpoint speaking a protocol the harness
   already has, no code: add an alias under `providers:` with a `type` (see
   *Provider aliases*). For a genuinely new protocol, implement the `Provider`
@@ -611,7 +614,9 @@ Containerfile          UBI10 + python3.14
 ## Scope (v1)
 
 Conversation state is in-memory only (histories do not survive a restart —
-files the model wrote to the workspace do); a skill's `scripts/` run only where the operator enables them, and only from the read-only skills mount — the workspace stays data, never code; no streaming yet. Each is a clean addition against the existing
-seams. Design notes live in [`docs/plan.md`](docs/plan.md)
+files the model wrote to the workspace do); a skill's `scripts/` run only where
+the operator enables them, and only from the read-only skills mount — the
+workspace stays data, never code; no streaming yet. Each is a clean addition
+against the existing seams. Design notes live in [`docs/plan.md`](docs/plan.md)
 (the build plan) and [`docs/future-work.md`](docs/future-work.md) (deferred
 items, incl. `web_fetch` SSRF allowlisting and keyed `web_search` backends).
