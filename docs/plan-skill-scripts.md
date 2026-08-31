@@ -82,6 +82,15 @@ leaves is one sentence a skill author can hold in their head: **`references/` is
 `.py` is explicit rather than inferred so adding another interpreter later is a
 deliberate act.
 
+One asymmetry falls out of comparing resolved paths rather than reasoning about intent,
+and predates this fix: symlinking the whole `scripts/` directory to a real directory kept
+elsewhere in the bundle works, because `base` moves with it and the target still resolves
+underneath; symlinking a single file back out to elsewhere in the bundle
+(`scripts/tool.py -> ../lib/tool.py`) does not, because `base` stays put and the target
+resolves outside it. Both are "a symlink that stays inside the skill," and only one is
+honoured. Relocating the whole directory is the supported way to keep a script's real
+home elsewhere; relocating one file is not, and the fix above doesn't change either.
+
 ### 3. Invocation
 
 ```python
