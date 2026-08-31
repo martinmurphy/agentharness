@@ -173,6 +173,13 @@ def child_env(skill: Skill, ws: Workspace, policy: ScriptPolicy) -> dict[str, st
 
     PYTHONDONTWRITEBYTECODE earns its place: /skills is mounted read-only, and a
     __pycache__ write that silently fails on every run is noise nobody will chase.
+
+    PYTHONNOUSERSITE earns its place too: on a system interpreter (not a venv),
+    Python imports $HOME/.local/lib/pythonX.Y/site-packages/usercustomize.py
+    before the script's first line. HOME above falls back to the workspace root
+    when the parent has none set, and the workspace is model-writable — so
+    without this, that one fallback line is a path from writable ground to code
+    that runs before the script does.
     """
     env = {
         "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
@@ -180,6 +187,7 @@ def child_env(skill: Skill, ws: Workspace, policy: ScriptPolicy) -> dict[str, st
         "LANG": "C.UTF-8",
         "PYTHONIOENCODING": "utf-8",
         "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
         "AGENTHARNESS_WORKSPACE_DIR": str(ws.root),
         "AGENTHARNESS_SKILL_DIR": str(skill.path),
     }

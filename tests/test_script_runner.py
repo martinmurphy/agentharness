@@ -233,6 +233,7 @@ def test_child_env_is_built_not_inherited(tmp_path, monkeypatch):
     assert env["AGENTHARNESS_SKILL_DIR"] == str(skill.path)
     assert env["PYTHONDONTWRITEBYTECODE"] == "1"
     assert env["PYTHONIOENCODING"] == "utf-8"
+    assert env["PYTHONNOUSERSITE"] == "1"
 
 
 def test_env_forwarded_only_when_declared_and_permitted(tmp_path, monkeypatch):
