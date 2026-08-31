@@ -497,10 +497,11 @@ the worked example: counting words is a thing models do confidently and wrongly,
 and the script is the version that is right every time.
 
 **Only a skill's own scripts run.** The tool takes a skill name and a path under
-that skill's `scripts/` directory, resolved with the same
-escape-proof check `read_skill_file` uses, plus a `.py` requirement. Code the
-model wrote into the workspace is *not* executable — the workspace is data. The
-rule is one sentence: `references/` is read, `scripts/` is run.
+that skill's `scripts/` directory, resolved with `read_skill_file`'s escape
+check plus an added check that `scripts/` itself hasn't been symlinked out of
+the skill, and a `.py` requirement. Code the model wrote into the workspace is
+*not* executable — the workspace is data. The rule is one sentence:
+`references/` is read, `scripts/` is run.
 
 **A script's environment is built, not inherited.** It gets `PATH`, `HOME`, a
 UTF-8 locale, and `AGENTHARNESS_WORKSPACE_DIR` / `AGENTHARNESS_SKILL_DIR`.

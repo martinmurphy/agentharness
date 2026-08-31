@@ -125,12 +125,16 @@ def parse_policy(config: Config) -> ScriptPolicy:
 def resolve_script(skill: Skill, rel_path: str) -> Path:
     """Resolve a runnable script inside a skill, refusing anything else.
 
-    Resolving against ``scripts/`` rather than the skill root is strictly
-    tighter than ``read_skill_file`` and subsumes its escape check: ``..``,
-    absolute paths, and symlink escapes all fail the one ``is_relative_to``.
-    The rule it leaves is a sentence a skill author can hold in their head —
-    references/ is read, scripts/ is run — so a skill cannot be talked into
-    executing its own documentation.
+    Resolving against ``scripts/`` rather than the skill root is tighter than
+    ``read_skill_file``, but it takes *two* checks to get there, not one:
+    ``base`` must itself resolve inside the skill directory (below), and only
+    then does the target's ``is_relative_to(base)`` check reject ``..``,
+    absolute paths, and symlink escapes. Both checks resolve through
+    symlinks, so skipping the first would let a skill whose own ``scripts/``
+    is a symlink turn the second into a no-op. The rule the pair leaves is a
+    sentence a skill author can hold in their head — references/ is read,
+    scripts/ is run — so a skill cannot be talked into executing its own
+    documentation.
     """
     if not isinstance(rel_path, str) or not rel_path:
         raise ValueError("'path' is required and must be a non-empty string")

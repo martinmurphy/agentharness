@@ -51,11 +51,18 @@ harness, so every rule in it is unit-testable without a registry, a provider, or
 ### 2. What may run — resolution
 
 `read_skill_file` resolves against the skill directory. This resolves against the skill's
-`scripts/` directory instead, which is strictly tighter and subsumes the escape check:
+`scripts/` directory instead, which is tighter — but tighter takes two checks, not one,
+because `.resolve()` follows symlinks on every path it touches:
 
 ```python
 def resolve_script(skill: Skill, rel_path: str) -> Path:
+    skill_root = skill.path.resolve()
     base = (skill.path / "scripts").resolve()
+    # base must itself be inside skill_root before it is trusted as a boundary:
+    # if scripts/ is itself a symlink, base silently becomes wherever that
+    # symlink points, and everything under it would pass the check below.
+    if not base.is_relative_to(skill_root):
+        raise ValueError(f"skill {skill.name!r}: its scripts/ directory escapes the skill directory")
     target = (skill.path / rel_path).resolve()
     if not target.is_relative_to(base):
         raise ValueError(f"{rel_path!r} is not under the skill's scripts/ directory")
@@ -66,11 +73,14 @@ def resolve_script(skill: Skill, rel_path: str) -> Path:
     return target
 ```
 
-One `is_relative_to` check rejects `..`, absolute paths, and symlink escapes together —
-the same single-choke-point pattern as `workspace.resolve_in`. The rule it leaves is one
-sentence a skill author can hold in their head: **`references/` is read, `scripts/` is
-run.** A skill cannot be talked into executing its own documentation, and `.py` is
-explicit rather than inferred so adding another interpreter later is a deliberate act.
+The first `is_relative_to` check confirms `scripts/` itself hasn't been symlinked out of
+the skill directory; only once that holds does the second reject `..`, absolute paths,
+and symlink escapes within it — the same single-choke-point pattern as
+`workspace.resolve_in`, applied to the base as well as the target. The rule the pair
+leaves is one sentence a skill author can hold in their head: **`references/` is read,
+`scripts/` is run.** A skill cannot be talked into executing its own documentation, and
+`.py` is explicit rather than inferred so adding another interpreter later is a
+deliberate act.
 
 ### 3. Invocation
 
@@ -288,7 +298,8 @@ podman build -t agentharness . && make run
 New `tests/test_script_runner.py`, over a temporary skills tree:
 
 - a script that prints, one that exits non-zero, one that reads stdin
-- `../` , an absolute path, a symlink out of `scripts/`, a file in `references/`, a
+- `../` , an absolute path, a symlink out of `scripts/`, a skill whose `scripts/`
+  directory is itself a symlink out of the skill, a file in `references/`, a
   non-`.py` file — each rejected, each with its own assertion
 - **the timeout kills the group**: a script that forks a long-lived child, then assert
   by PID that the grandchild is gone, not merely that we stopped waiting
@@ -306,3 +317,12 @@ New `tests/test_script_runner.py`, over a temporary skills tree:
 
 The suite passes, ruff is clean, and the bundled `word-frequency` skill runs
 end to end in the container with `skill_scripts.enabled: true`.
+
+**Correction.** The final whole-branch review found that section 2's
+`resolve_script` as originally specified above was exploitable: resolving
+both the `scripts/` base and the target through symlinks means a skill whose
+own `scripts/` directory is a symlink out of the skill (e.g. into the
+workspace) made the target check pass for a file the model wrote itself.
+Section 2 above has been corrected to the shipped fix — a containment check
+on `base` itself, before it is trusted as a boundary — and the test list
+below now names that case explicitly.
