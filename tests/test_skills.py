@@ -3,10 +3,18 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
 from agentharness.skills.loader import load_skills, read_skill_file
+from agentharness.skills.runner import resolve_script
+
+# The repo's real, shipped skills/ directory — every other test in this file
+# builds a synthetic skill under tmp_path. Located relative to this test file
+# rather than the process cwd, so it passes regardless of where pytest is
+# invoked from.
+REPO_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 
 VALID_FRONTMATTER = """---
 name: {name}
@@ -200,3 +208,19 @@ def test_invalid_script_env_name_fails_only_that_skill(tmp_path):
     assert [s.name for s in result.skills] == ["good"]
     assert len(result.errors) == 1
     assert "not-an-env-name" in result.errors[0].reason
+
+
+def test_the_bundled_skills_directory_actually_loads():
+    """No other test in this suite loads the repo's real skills/ directory —
+    every load_skills call elsewhere here uses a synthetic tmp_path fixture.
+    This branch ships skills/word-frequency/ into the repo, so a malformed
+    SKILL.md there (or in any bundled skill) would otherwise pass CI green.
+    """
+    result = load_skills(REPO_SKILLS_DIR)
+    assert not result.errors, [(e.path, e.reason) for e in result.errors]
+    assert result.by_name("word-frequency") is not None
+
+    skill = result.by_name("word-frequency")
+    script = resolve_script(skill, "scripts/wordfreq.py")
+    assert script.name == "wordfreq.py"
+    assert script.is_file()
