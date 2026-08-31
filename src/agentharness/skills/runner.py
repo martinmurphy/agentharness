@@ -233,7 +233,7 @@ def _truncate(text: str, limit: int) -> tuple[str, int]:
     return kept, len(raw) - len(kept.encode("utf-8"))
 
 
-def _kill_group(proc: subprocess.Popen) -> None:
+def _kill_group(proc: subprocess.Popen[str]) -> None:
     try:
         os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
     except (ProcessLookupError, PermissionError):

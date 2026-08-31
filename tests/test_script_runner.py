@@ -129,6 +129,9 @@ def test_resolves_a_script_under_scripts(tmp_path):
     ("notes.py", "scripts/"),
     ("scripts/notes.txt", "only .py"),
     ("scripts/missing.py", "no such script"),
+    (123, "non-empty string"),
+    (None, "non-empty string"),
+    ("", "non-empty string"),
 ])
 def test_rejects(tmp_path, rel_path, fragment):
     skill = _skill(tmp_path, scripts={
@@ -454,7 +457,9 @@ def test_timeout_carries_accurate_dropped_byte_counts(tmp_path):
             timeout=1
         )
     
-    # The exception should carry the real dropped count, not 0
-    assert exc.value.stdout_dropped > 0
-    # Verify it's numerically reasonable: we wrote 200 bytes, kept 100, so dropped ~100
-    assert 90 < exc.value.stdout_dropped < 110
+    # The exception should carry the real dropped count, not 0. We wrote 200
+    # bytes and kept 100, so exactly 100 must be reported dropped — a wide
+    # band here would admit the very bug this test exists to catch (e.g. a
+    # dropped count computed from the wrong buffer, or one that's merely
+    # nonzero without being accurate).
+    assert exc.value.stdout_dropped == 100
