@@ -745,3 +745,28 @@ def test_timeout_is_an_error_carrying_partial_output(tmp_path):
     assert result.is_error
     assert "timeout" in result.content
     assert "started" in result.content
+
+
+def test_timeout_renders_truncation_notice_when_output_was_truncated(tmp_path):
+    """When a script floods output past max_output_bytes and then times out,
+    the rendered error should include the truncation notice so the model
+    knows the output was incomplete.
+    """
+    reg = _script_registry(tmp_path, """
+        import sys, time
+        # Write 200 bytes to exceed max_output_bytes of 100
+        sys.stdout.write("x" * 200)
+        sys.stdout.flush()
+        # Then sleep long enough to timeout
+        time.sleep(60)
+    """, default_timeout=1, max_timeout=1, max_output_bytes=100)
+    result = reg.dispatch(ToolCall(
+        id="c7", name="run_skill_script",
+        arguments={"skill": "demo", "path": "scripts/run.py"},
+    ))
+    assert result.is_error
+    assert "timeout" in result.content
+    # The key assertion: the truncation notice must appear so the model knows
+    # output was cut off, not complete.
+    assert "truncated" in result.content
+    assert "more bytes" in result.content

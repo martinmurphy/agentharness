@@ -361,3 +361,35 @@ def test_escaped_grandchild_output_is_recovered_not_discarded(tmp_path, monkeypa
     assert proc.stdin.closed
     assert proc.stdout.closed
     assert proc.stderr.closed
+
+
+def test_timeout_carries_accurate_dropped_byte_counts(tmp_path):
+    """When a script floods output past max_output_bytes and times out, the
+    exception should carry the actual dropped byte counts, not zeros.
+
+    This ensures the rendering layer can tell the model when output was truncated.
+    """
+    # Craft a script that writes well past max_output_bytes before hanging.
+    # With max_output_bytes=100, writing 200 bytes guarantees truncation.
+    skill = _skill(tmp_path, scripts={"scripts/flooder.py": """
+        import sys, time
+        # Write 200 bytes of output
+        sys.stdout.write("x" * 200)
+        sys.stdout.flush()
+        # Then sleep long enough to be killed
+        time.sleep(60)
+    """})
+    
+    with pytest.raises(ScriptTimeout) as exc:
+        run_script(
+            skill,
+            "scripts/flooder.py",
+            _ws(tmp_path),
+            _enabled(max_output_bytes=100),
+            timeout=1
+        )
+    
+    # The exception should carry the real dropped count, not 0
+    assert exc.value.stdout_dropped > 0
+    # Verify it's numerically reasonable: we wrote 200 bytes, kept 100, so dropped ~100
+    assert 90 < exc.value.stdout_dropped < 110

@@ -193,11 +193,20 @@ class ScriptTimeout(ValueError):
     hang explains itself.
     """
 
-    def __init__(self, timeout: int, stdout: str, stderr: str) -> None:
+    def __init__(
+        self,
+        timeout: int,
+        stdout: str,
+        stderr: str,
+        stdout_dropped: int = 0,
+        stderr_dropped: int = 0,
+    ) -> None:
         super().__init__(f"script exceeded its {timeout}s timeout and was killed")
         self.timeout = timeout
         self.stdout = stdout
         self.stderr = stderr
+        self.stdout_dropped = stdout_dropped
+        self.stderr_dropped = stderr_dropped
 
 
 def _truncate(text: str, limit: int) -> tuple[str, int]:
@@ -283,9 +292,9 @@ def run_script(
                 if pipe is not None:
                     pipe.close()
             proc.poll()
-        kept_out, _ = _truncate(out or "", policy.max_output_bytes)
-        kept_err, _ = _truncate(err or "", policy.max_output_bytes)
-        raise ScriptTimeout(seconds, kept_out, kept_err) from None
+        kept_out, dropped_out = _truncate(out or "", policy.max_output_bytes)
+        kept_err, dropped_err = _truncate(err or "", policy.max_output_bytes)
+        raise ScriptTimeout(seconds, kept_out, kept_err, dropped_out, dropped_err) from None
 
     kept_out, dropped_out = _truncate(out, policy.max_output_bytes)
     kept_err, dropped_err = _truncate(err, policy.max_output_bytes)

@@ -86,8 +86,8 @@ def make_script_tools(
             # An error, but the partial output goes with it: that is usually
             # where the hang explains itself.
             raise ValueError(
-                f"{exc}\n--- stdout so far ---\n{_stream(exc.stdout, 0)}\n"
-                f"--- stderr so far ---\n{_stream(exc.stderr, 0)}"
+                f"{exc}\n--- stdout so far ---\n{_stream(exc.stdout, exc.stdout_dropped)}\n"
+                f"--- stderr so far ---\n{_stream(exc.stderr, exc.stderr_dropped)}"
             ) from None
         return _render(result)
 
