@@ -15,7 +15,8 @@ model.
   everything else.
 - **Tools** — model-callable functions in a registry: `greet` (a trivial
   example that proves the loop), `read_skill` / `read_skill_file` (Agent Skills
-  progressive disclosure), `list_dir` / `read_file` / `write_file` / `make_dir`
+  progressive disclosure), `run_skill_script` (run a skill's bundled Python,
+  off by default), `list_dir` / `read_file` / `write_file` / `make_dir`
   (the workspace directory), `web_search` / `web_fetch` (find and read web
   pages), `list_providers` / `list_models` (discover configured providers and
   their models), and `spawn_subagent` (delegate to a nested agent). See
@@ -480,6 +481,72 @@ usual `http://host.containers.internal:PORT/mcp` — gives `421 Misdirected
 Request` until that name is in the *server's* allowed hosts. That is the server
 refusing, not the harness.
 
+### Skill scripts
+
+A skill can bundle Python under `scripts/`, and — when you turn it on — the
+model can run it:
+
+```
+skill_scripts:
+  enabled: true
+```
+
+Nothing runs by default. With `enabled: false`, `run_skill_script` is not
+registered, so the model never sees it. The bundled `word-frequency` skill is
+the worked example: counting words is a thing models do confidently and wrongly,
+and the script is the version that is right every time.
+
+**Only a skill's own scripts run.** The tool takes a skill name and a path under
+that skill's `scripts/` directory, resolved with `read_skill_file`'s escape
+check plus an added check that `scripts/` itself hasn't been symlinked out of
+the skill, and a `.py` requirement. Code the model wrote into the workspace is
+*not* executable — the workspace is data. The rule is one sentence:
+`references/` is read, `scripts/` is run.
+
+**A script's environment is built, not inherited.** It gets `PATH`, `HOME`, a
+UTF-8 locale, and `AGENTHARNESS_WORKSPACE_DIR` / `AGENTHARNESS_SKILL_DIR`.
+No `ANTHROPIC_API_KEY`, no anything else — a script's stdout goes back into the
+model's context, so an inherited key would be one `print` away from the
+transcript. A script that genuinely needs a token requires *two* declarations:
+the skill asks in its frontmatter, and you permit it in config.
+
+```yaml
+# skills/deploy-notes/SKILL.md
+metadata:
+  env: "GITHUB_TOKEN"
+```
+```yaml
+# config.yaml
+skill_scripts:
+  env_allowlist: [GITHUB_TOKEN]
+```
+
+Only the intersection is forwarded, so a skill you downloaded cannot help itself
+to a token by asking for one.
+
+Three limits worth knowing before you enable this:
+
+- **A subprocess is not confined to the workspace.** The filesystem tools are;
+  a script is not, and can reach anything the container user can. The container
+  is the boundary, which is why only vetted scripts under a read-only `/skills`
+  mount may run.
+- **Scripts get the harness's own interpreter** — the stdlib plus what
+  agentharness depends on, and nothing else. A skill needing `numpy` means
+  adding it to the `Containerfile`; there is no per-skill environment and no
+  install at run time.
+- **The environment scrub stops an accident, not a hostile script.** It keeps
+  a key from reaching a script that never asked for it; it is not a boundary
+  against one that goes looking. A running script can read
+  `/proc/<ppid>/environ` on Linux and recover the harness's whole environment
+  anyway, and `HOME` is forwarded verbatim — on a host run, that's your real
+  home directory, which is where `mcp/oauth.py` keeps its token store. A
+  script you run is a script you have vetted, and on a host run it runs as
+  you.
+
+A run is capped by `max_timeout` and killed by process *group* if it overruns, so
+a script that forked cannot leave anything behind. Output is capped per stream
+and truncated with a marker.
+
 ## Extending
 
 - **Add a tool** — write a handler and a `Tool` (see `tools/greet.py`, or
@@ -520,8 +587,10 @@ refusing, not the harness.
   task per server), `manager.py` owns the connections and decides tool identity,
   and `oauth.py` supplies token storage and the browser leg.
 - **Add a skill** — create `skills/<name>/SKILL.md` with `name` (matching the
-  directory) and `description` frontmatter. Optional `references/`, `assets/`,
-  `scripts/` files are read as text via `read_skill_file`. Run `/reload`.
+  directory) and `description` frontmatter. Optional `references/` and
+  `assets/` files are read as text via `read_skill_file`; `scripts/` are read
+  the same way and, with `skill_scripts.enabled`, run with `run_skill_script`
+  (see *Skill scripts*). Run `/reload`.
 - **Add a provider** — for another endpoint speaking a protocol the harness
   already has, no code: add an alias under `providers:` with a `type` (see
   *Provider aliases*). For a genuinely new protocol, implement the `Provider`
@@ -554,9 +623,9 @@ Containerfile          UBI10 + python3.14
 ## Scope (v1)
 
 Conversation state is in-memory only (histories do not survive a restart —
-files the model wrote to the workspace do); skill `scripts/` are readable as
-text but never executed, and nothing here executes anything either — `write_file`
-writes bytes; no streaming yet. Each is a clean addition against the existing
-seams. Design notes live in [`docs/plan.md`](docs/plan.md)
+files the model wrote to the workspace do); a skill's `scripts/` run only where
+the operator enables them, and only from the read-only skills mount — the
+workspace stays data, never code; no streaming yet. Each is a clean addition
+against the existing seams. Design notes live in [`docs/plan.md`](docs/plan.md)
 (the build plan) and [`docs/future-work.md`](docs/future-work.md) (deferred
 items, incl. `web_fetch` SSRF allowlisting and keyed `web_search` backends).

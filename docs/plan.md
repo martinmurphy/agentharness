@@ -32,7 +32,7 @@ Decisions taken up front (from the design questions):
 |---|---|
 | Skill exposure | Catalog in system prompt + `read_skill` / `read_skill_file` tools (spec's 3-stage progressive disclosure) |
 | State persistence | **In-memory only** — states live for the life of the REPL process |
-| Skill `scripts/` | **Read as text, never executed** in v1 |
+| Skill `scripts/` | Read as text; **run** via `run_skill_script` behind `skill_scripts.enabled`, default off |
 | Providers | `Provider` protocol + **Anthropic and OpenAI-compatible** implementations |
 
 ### Verified environment facts
@@ -220,6 +220,7 @@ rather than emitting binary into the context.
 | `greet` | `name: str, style: "formal" \| "casual" \| "enthusiastic" = "casual"` | a greeting string |
 | `read_skill` | `name: str` | full `SKILL.md` body, frontmatter stripped |
 | `read_skill_file` | `skill: str, path: str` | UTF-8 text of a bundled file under the skill dir |
+| `run_skill_script` | `skill: str, path: str, args: list[str], stdin: str, timeout: int` | exit status, stdout, and stderr of a `.py` under the skill's `scripts/` |
 
 `greet` exists only to prove the loop end-to-end; keep it trivial.
 
@@ -336,7 +337,7 @@ via `/reload`, and ephemeral (in-memory) state across restarts.
 ## Post-build increments
 
 Features added after the initial four-phase build, each landed against the seams above. Every one
-until the last left the agent loop untouched; parallel dispatch is the first that changed it.
+but parallel dispatch left the agent loop untouched; that one changed it.
 
 - **Gemini provider (AI Studio)** — a third `Provider` adapter (`providers/gemini.py`) using the
   `google-genai` SDK, key from `GEMINI_API_KEY`. Maps roles (assistant→model, tool results→user
@@ -392,3 +393,12 @@ until the last left the agent loop untouched; parallel dispatch is the first tha
   executing and where it renders, replacing the ambient `states.active` that three tools used to
   read — ambient input cannot be shared by racing turns. Detailed design note:
   [`plan-async-harness.md`](plan-async-harness.md).
+- **Skill scripts (`run_skill_script` tool)** — a skill can bundle Python under `scripts/`, run
+  only when `skill_scripts.enabled` is on (`false` by default, the same shape as
+  `workspace_writable: false` above: the tool is never registered). `skills/runner.py` resolves
+  the target against the skill's own `scripts/` directory only — no `..`, no absolute path, `.py`
+  required — so the workspace stays data, never code. The child environment is built from empty
+  and grows a variable only if the skill declares it in `metadata.env` *and* the operator allows
+  it in `env_allowlist`; a run is clamped to `max_timeout`, killed by process group if it
+  overruns, output capped per stream. Detailed design note:
+  [`plan-skill-scripts.md`](plan-skill-scripts.md).

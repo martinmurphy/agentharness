@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import os
+import textwrap
+
 import pytest
 
 from agentharness.providers.base import ToolCall
 from agentharness.skills.loader import load_skills
+from agentharness.skills.runner import ScriptPolicy
 from agentharness.tools.greet import greet_tool
 from agentharness.tools.model_tools import list_models_tool
 from agentharness.tools.registry import ToolRegistry, build_default_registry
+from agentharness.tools.script_tools import make_script_tools
 from agentharness.tools.subagent_tools import spawn_subagent_tool
 from agentharness.workspace import Workspace
 
@@ -631,3 +636,228 @@ def test_list_models_accepts_an_alias_name():
     # and the enum offered to the model lists it
     spec = reg.get("list_models").input_schema
     assert "lmstudio" in spec["properties"]["provider"]["enum"]
+
+
+# ---- script_tools -----------------------------------------------------------
+
+
+def _script_skillset(tmp_path, source='print("hi")\n', name="demo"):
+    directory = tmp_path / "skills" / name
+    (directory / "scripts").mkdir(parents=True)
+    (directory / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: A demo skill used by tests.\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    (directory / "scripts" / "run.py").write_text(
+        textwrap.dedent(source).lstrip(), encoding="utf-8"
+    )
+    return load_skills(tmp_path / "skills")
+
+
+def _script_registry(tmp_path, source='print("hi")\n', **policy_kwargs):
+    reg = ToolRegistry()
+    policy = ScriptPolicy(enabled=True, **policy_kwargs)
+    for tool in make_script_tools(_script_skillset(tmp_path, source), _ws(tmp_path), policy):
+        reg.register(tool)
+    return reg
+
+
+def test_disabled_policy_registers_no_tool(tmp_path):
+    tools = make_script_tools(_script_skillset(tmp_path), _ws(tmp_path), ScriptPolicy())
+    assert tools == []
+
+
+def test_run_skill_script_renders_a_result(tmp_path):
+    reg = _script_registry(tmp_path, """
+        import sys
+        print("counted 3 things")
+        print("a warning", file=sys.stderr)
+    """)
+    result = reg.dispatch(ToolCall(
+        id="c1",
+        name="run_skill_script",
+        arguments={"skill": "demo", "path": "scripts/run.py"},
+    ))
+    assert not result.is_error
+    assert "exit status: 0" in result.content
+    assert "counted 3 things" in result.content
+    assert "a warning" in result.content
+
+
+def test_empty_streams_render_as_empty(tmp_path):
+    reg = _script_registry(tmp_path, "pass\n")
+    result = reg.dispatch(ToolCall(
+        id="c2", name="run_skill_script",
+        arguments={"skill": "demo", "path": "scripts/run.py"},
+    ))
+    assert "(empty)" in result.content
+
+
+def test_non_zero_exit_is_not_a_tool_error(tmp_path):
+    reg = _script_registry(tmp_path, "import sys; sys.exit(4)\n")
+    result = reg.dispatch(ToolCall(
+        id="c3", name="run_skill_script",
+        arguments={"skill": "demo", "path": "scripts/run.py"},
+    ))
+    assert not result.is_error          # the model should read it, not give up
+    assert "exit status: 4" in result.content
+
+
+def test_non_string_args_are_rejected_with_advice(tmp_path):
+    reg = _script_registry(tmp_path)
+    result = reg.dispatch(ToolCall(
+        id="c4", name="run_skill_script",
+        arguments={"skill": "demo", "path": "scripts/run.py", "args": [3]},
+    ))
+    assert result.is_error
+    assert "list of strings" in result.content
+
+
+def test_bare_string_args_are_rejected_with_advice(tmp_path):
+    reg = _script_registry(tmp_path)
+    result = reg.dispatch(ToolCall(
+        id="c4b", name="run_skill_script",
+        arguments={"skill": "demo", "path": "scripts/run.py", "args": "abc"},
+    ))
+    assert result.is_error
+    assert "list of strings" in result.content
+
+
+def test_unknown_skill_names_the_available_ones(tmp_path):
+    reg = _script_registry(tmp_path)
+    result = reg.dispatch(ToolCall(
+        id="c5", name="run_skill_script",
+        arguments={"skill": "nope", "path": "scripts/run.py"},
+    ))
+    assert result.is_error
+    assert "demo" in result.content
+
+
+def test_timeout_is_an_error_carrying_partial_output(tmp_path):
+    reg = _script_registry(tmp_path, """
+        import time
+        print("started", flush=True)
+        time.sleep(60)
+    """, default_timeout=1, max_timeout=1)
+    result = reg.dispatch(ToolCall(
+        id="c6", name="run_skill_script",
+        arguments={"skill": "demo", "path": "scripts/run.py"},
+    ))
+    assert result.is_error
+    assert "timeout" in result.content
+    assert "started" in result.content
+
+
+def test_timeout_renders_truncation_notice_when_output_was_truncated(tmp_path):
+    """When a script floods output past max_output_bytes and then times out,
+    the rendered error should include the truncation notice so the model
+    knows the output was incomplete.
+    """
+    reg = _script_registry(tmp_path, """
+        import sys, time
+        # Write 200 bytes to exceed max_output_bytes of 100
+        sys.stdout.write("x" * 200)
+        sys.stdout.flush()
+        # Then sleep long enough to timeout
+        time.sleep(60)
+    """, default_timeout=1, max_timeout=1, max_output_bytes=100)
+    result = reg.dispatch(ToolCall(
+        id="c7", name="run_skill_script",
+        arguments={"skill": "demo", "path": "scripts/run.py"},
+    ))
+    assert result.is_error
+    assert "timeout" in result.content
+    # The key assertion: the truncation notice must appear so the model knows
+    # output was cut off, not complete.
+    assert "truncated" in result.content
+    assert "more bytes" in result.content
+
+
+def test_no_route_lets_the_model_run_its_own_code(tmp_path):
+    """The headline invariant of the whole feature, exercised end to end
+    through the real ToolRegistry rather than resolve_script directly: no
+    call a model can actually make through ``run_skill_script`` may execute
+    a file the model itself wrote into the workspace.
+
+    Plants one file in the workspace and enumerates every route a model has
+    to reach it:
+
+    - ``..`` out of a normal skill's scripts/ directory
+    - an absolute path
+    - a symlink placed inside a normal skill's scripts/ directory
+    - a skill whose scripts/ directory is *itself* a symlink into the
+      workspace (the bug this branch's item 1 fixes: resolve_script's
+      is_relative_to check resolves symlinks on both sides, so an escaped
+      `scripts` symlink used to make every file under it pass)
+
+    Every route must come back as a tool error, and the marker text the
+    planted script would print if it ran must never appear in any result. A
+    positive control (the skill's own legitimate script) is dispatched first,
+    so the test can't pass vacuously against a fixture that's silently broken
+    (e.g. every route erroring out with "unknown skill" because skill loading
+    regressed, which would still satisfy "is_error and no marker" while
+    proving nothing about the resolution logic).
+    """
+    marker = "MODEL AUTHORED CODE RAN"
+    ws = _ws(tmp_path)
+    evil = ws.root / "evil.py"
+    evil.write_text(f"print({marker!r})\n", encoding="utf-8")
+
+    skills_root = tmp_path / "skills"
+    normal = skills_root / "normal"
+    (normal / "scripts").mkdir(parents=True)
+    (normal / "SKILL.md").write_text(
+        "---\nname: normal\ndescription: A normal skill.\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    (normal / "scripts" / "run.py").write_text('print("hi")\n', encoding="utf-8")
+    # Route 3: a symlink placed inside scripts/, pointing at the workspace file.
+    (normal / "scripts" / "link.py").symlink_to(evil)
+
+    # Route 4: a skill whose scripts/ directory is itself a symlink into the
+    # workspace.
+    linked = skills_root / "linked"
+    linked.mkdir(parents=True)
+    (linked / "SKILL.md").write_text(
+        "---\nname: linked\ndescription: A skill whose scripts/ is a symlink.\n---\n\nBody.\n",
+        encoding="utf-8",
+    )
+    (linked / "scripts").symlink_to(ws.root)
+
+    skillset = load_skills(skills_root)
+    policy = ScriptPolicy(enabled=True)
+    reg = build_default_registry(skillset, ws, policy=policy)
+    assert "run_skill_script" in reg
+
+    # Positive control, dispatched before the negative routes below: if this
+    # fails, the fixture itself is broken (skill loading regressed, the
+    # policy didn't take, the registry wiring changed) and that is what
+    # should be reported — not a false "the invariant holds" from every
+    # negative route coincidentally erroring out for an unrelated reason
+    # (e.g. "unknown skill" if load_skills silently dropped "normal").
+    legit = reg.dispatch(ToolCall(
+        id="route-legit",
+        name="run_skill_script",
+        arguments={"skill": "normal", "path": "scripts/run.py"},
+    ))
+    assert not legit.is_error, f"the control route itself failed: {legit.content!r}"
+    assert "hi" in legit.content
+
+    # rel_path is joined onto skill.path (resolve_script does skill.path /
+    # rel_path), so a ".." escape written from scripts/ needs that prefix to
+    # land where it looks like it should.
+    dotdot_from_scripts = os.path.relpath(evil, start=(normal / "scripts"))
+    routes = {
+        "dotdot": ("normal", f"scripts/{dotdot_from_scripts}"),
+        "absolute": ("normal", str(evil)),
+        "symlink_in_scripts": ("normal", "scripts/link.py"),
+        "scripts_dir_is_symlink": ("linked", "scripts/evil.py"),
+    }
+    for label, (skill_name, path) in routes.items():
+        result = reg.dispatch(ToolCall(
+            id=f"route-{label}",
+            name="run_skill_script",
+            arguments={"skill": skill_name, "path": path},
+        ))
+        assert result.is_error, f"route {label!r} was not refused: {result.content!r}"
+        assert marker not in result.content, f"route {label!r} let the model's code run"

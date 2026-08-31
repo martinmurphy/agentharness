@@ -482,3 +482,82 @@ and needs wrapping. If both blocks get the key, the resolver belongs in a shared
 
 `verify: false` should be visibly unsafe — marked in `/providers` and `/mcp`, not
 merely accepted.
+
+## `run_script`'s `args` aren't validated element-by-element
+
+**Problem.** `run_script` splats `args` into the subprocess command list
+(`[sys.executable, str(target), *args]`) without checking that each element
+is a string. `tools/script_tools.py` validates this before calling — the
+model can only ever reach `run_script` with a list of strings — but
+`run_script` is a public function in `skills/runner.py`, and every other
+validation failure in this module raises `ValueError`. A non-string element
+passed directly, from Python rather than from the model, raises `TypeError`
+out of `subprocess.Popen` instead — a different exception a caller has to
+know to catch.
+
+**Why deferred.** Genuinely unreachable from the tool surface today; the only
+route that matters enforces the type first. Fixing it is a one-line
+validation with no behaviour change reachable from the model.
+
+**Sketch of the fix.** Before building the `Popen` argv in `run_script`:
+`if not all(isinstance(a, str) for a in args): raise ValueError(...)`,
+matching the message shape `_string_list` already uses in
+`tools/script_tools.py`.
+
+## Untested paths in the script runner: `stderr_dropped`, `ScriptTimeout.stderr`, the missing-workspace error
+
+**Problem.** No test asserts three paths in `skills/runner.py`:
+`ScriptResult.stderr_dropped` (stdout's truncation is pinned by
+`test_output_is_capped`; stderr's twin never runs), `ScriptTimeout.stderr`
+(its `stdout` is pinned by `test_timeout_kills_the_whole_process_group`,
+`stderr` isn't), and the `ValueError` `run_script` raises when `ws.root`
+doesn't exist. The last one is what a real operator hits with a mistyped
+`workspace_dir` in config — not an edge case, the ordinary mistake.
+
+**Why deferred.** None of the three is a design gap — each is the same code
+path as its tested twin (the other stream, or the other early-exit check),
+just never separately exercised. Cheap to close, not urgent.
+
+**Sketch of the fix.** Three small tests: a script that floods stderr past
+`max_output_bytes` and asserts `stderr_dropped`; the forking-timeout test's
+stderr counterpart; and `run_script` called against a `Workspace` pointed at
+a path that doesn't exist, asserting the `ValueError` names the path.
+
+## `test_escaped_grandchild_output_is_recovered_not_discarded` doesn't check dropped counts
+
+**Problem.** That test asserts the recovered `stdout`/`stderr` text once a
+grandchild has escaped the process group, but not `stdout_dropped` /
+`stderr_dropped`. Both timeout branches — the clean kill and the escaped-
+grandchild rescue — currently share the same `_truncate` calls, so this is
+harmless today. It would stop being harmless if the two branches ever
+diverge (a different cap for the rescue path, say): a wrong dropped count on
+that path would go unnoticed.
+
+**Why deferred.** Latent, not live — nothing exercises a different code path
+today.
+
+**Sketch of the fix.** Add the dropped-count assertions to the existing test,
+computed the same way `test_timeout_carries_accurate_dropped_byte_counts`
+does for the plain timeout path.
+
+## `max_output_bytes` caps what the model sees, not what the harness buffers
+
+**Problem.** The cap is applied in `_truncate`, after `communicate()`
+returns — and `communicate()` accumulates the whole stdout/stderr stream in
+the harness's own memory before that point. A script that prints gigabytes,
+whether it exits cleanly or hangs until the timeout, can OOM the process
+that launched it regardless of how small `max_output_bytes` is set. The cap
+protects the model's context window; it does not protect the harness.
+
+**Why deferred.** Inherent to `subprocess.Popen.communicate()`, which has no
+streaming-with-a-cap mode. This is a chosen mechanism outrunning one of its
+costs, not a bug: `communicate()` earns its place for the `timeout=` and
+process-group-kill ergonomics `run_script` already relies on. Fixing it
+properly means reading the pipes directly, which is real work.
+
+**Sketch of the fix.** Replace `communicate()` with a manual read loop (two
+reader threads, or a `selectors` loop over `proc.stdout`/`proc.stderr`) that
+stops accumulating — without killing the process — once a stream exceeds
+`max_output_bytes`, so the cap bounds memory as well as the render. Keep the
+timeout and process-group-kill semantics unchanged; only the accumulation
+strategy changes.

@@ -3,15 +3,23 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
 from agentharness.skills.loader import load_skills, read_skill_file
+from agentharness.skills.runner import resolve_script
+
+# The repo's real, shipped skills/ directory — every other test in this file
+# builds a synthetic skill under tmp_path. Located relative to this test file
+# rather than the process cwd, so it passes regardless of where pytest is
+# invoked from.
+REPO_SKILLS_DIR = Path(__file__).resolve().parent.parent / "skills"
 
 VALID_FRONTMATTER = """---
 name: {name}
 description: {desc}
----
+{extra}---
 
 # Body
 
@@ -20,12 +28,12 @@ Some instructions.
 
 
 def _write_skill(root, dirname, *, name=None, desc="A valid description of the skill.",
-                 body_after_fence=True):
+                 body_after_fence=True, extra=""):
     name = dirname if name is None else name
     skill_dir = root / dirname
     skill_dir.mkdir(parents=True)
     if body_after_fence:
-        text = VALID_FRONTMATTER.format(name=name, desc=desc)
+        text = VALID_FRONTMATTER.format(name=name, desc=desc, extra=extra)
     else:
         text = f"name: {name}\ndescription: {desc}\n"  # no frontmatter fences
     (skill_dir / "SKILL.md").write_text(text, encoding="utf-8")
@@ -174,3 +182,51 @@ def test_missing_file_rejected(tmp_path):
     skill = result.by_name("with-ref")
     with pytest.raises(ValueError, match="no such file"):
         read_skill_file(skill, "references/nope.md")
+
+
+ENV_META = 'metadata:\n  env: "GITHUB_TOKEN JIRA_TOKEN"\n'
+
+
+def test_script_env_defaults_to_empty(tmp_path):
+    _write_skill(tmp_path, "plain")
+    skill = load_skills(tmp_path).by_name("plain")
+    assert skill.script_env == frozenset()
+
+
+def test_script_env_parsed_from_metadata(tmp_path):
+    _write_skill(tmp_path, "declares", extra=ENV_META)
+    skill = load_skills(tmp_path).by_name("declares")
+    assert skill.script_env == frozenset({"GITHUB_TOKEN", "JIRA_TOKEN"})
+    # metadata itself is left intact — script_env is a parsed view, not a move.
+    assert skill.metadata["env"] == "GITHUB_TOKEN JIRA_TOKEN"
+
+
+def test_invalid_script_env_name_fails_only_that_skill(tmp_path):
+    _write_skill(tmp_path, "bad", extra='metadata:\n  env: "not-an-env-name"\n')
+    _write_skill(tmp_path, "good")
+    result = load_skills(tmp_path)
+    assert [s.name for s in result.skills] == ["good"]
+    assert len(result.errors) == 1
+    assert "not-an-env-name" in result.errors[0].reason
+
+
+def test_the_bundled_skills_directory_actually_loads():
+    """No other test in this suite loads the repo's real skills/ directory —
+    every load_skills call elsewhere here uses a synthetic tmp_path fixture.
+    This branch ships skills/word-frequency/ into the repo, so a malformed
+    SKILL.md there (or in any bundled skill) would otherwise pass CI green.
+
+    load_skills silently *skips* a directory with no SKILL.md rather than
+    recording an error for it (see load_skills's for-loop: "if not
+    skill_md.is_file(): continue"), so "no errors" alone would not notice a
+    bundled skill that lost its SKILL.md entirely. Assert both shipped
+    skills are present by name, not just that loading was error-free.
+    """
+    result = load_skills(REPO_SKILLS_DIR)
+    assert not result.errors, [(e.path, e.reason) for e in result.errors]
+    assert {s.name for s in result.skills} >= {"word-frequency", "greeting-etiquette"}
+
+    skill = result.by_name("word-frequency")
+    script = resolve_script(skill, "scripts/wordfreq.py")
+    assert script.name == "wordfreq.py"
+    assert script.is_file()

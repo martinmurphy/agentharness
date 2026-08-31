@@ -58,6 +58,10 @@ class Config:
     # same reason as ``providers``: this module knows nothing about what the
     # blocks mean. agentharness.mcp.config parses and validates them.
     mcp_servers: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Skill script execution. Held raw for the same reason as ``mcp_servers``:
+    # this module knows nothing about what the block means.
+    # agentharness.skills.runner parses and validates it.
+    skill_scripts: dict[str, Any] = field(default_factory=dict)
 
     def provider_options(self, name: str) -> dict[str, Any]:
         """Return the settings block for a named provider (empty dict if none)."""
@@ -75,7 +79,7 @@ def _config_path() -> Path | None:
     return None
 
 
-def _as_bool(v: Any) -> bool:
+def as_bool(v: Any) -> bool:
     return str(v).strip().lower() in ("1", "true", "yes", "on")
 
 
@@ -86,14 +90,14 @@ _SCALAR_FIELDS: dict[str, Any] = {
     "max_tokens": int,
     "effort": str,
     "thinking_budget": int,
-    "show_thinking": _as_bool,
-    "show_usage": _as_bool,
+    "show_thinking": as_bool,
+    "show_usage": as_bool,
     "max_tool_iterations": int,
     "max_concurrency": int,
     "max_jobs": int,
     "skills_dir": str,
     "workspace_dir": str,
-    "workspace_writable": _as_bool,
+    "workspace_writable": as_bool,
     "system_prompt": str,
 }
 
@@ -116,7 +120,7 @@ def load_config() -> Config:
         elif name in data:
             kwargs[name] = data[name]
 
-    for block in ("providers", "mcp_servers"):
+    for block in ("providers", "mcp_servers", "skill_scripts"):
         if block in data and isinstance(data[block], dict):
             kwargs[block] = data[block]
 

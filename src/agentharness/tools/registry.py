@@ -19,6 +19,7 @@ if TYPE_CHECKING:
     # modules below are imported lazily to break a genuine cycle with Tool.
     from agentharness.config import Config
     from agentharness.skills.loader import SkillSet
+    from agentharness.skills.runner import ScriptPolicy
     from agentharness.workspace import Workspace
 
 Handler = Callable[[dict[str, Any]], str]
@@ -83,6 +84,7 @@ def build_default_registry(
     skillset: SkillSet,
     workspace: Workspace,
     config: Config | None = None,
+    policy: ScriptPolicy | None = None,
 ) -> ToolRegistry:
     """Build the registry with the example ``greet`` tool, skill, and file tools.
 
@@ -90,11 +92,14 @@ def build_default_registry(
     at call time, so a ``/reload`` that replaces either is picked up if callers
     rebuild the registry (see repl.reload). A non-writable workspace contributes
     only its read tools. ``config`` is what lets ``list_providers`` see provider
-    aliases; without it, only the built-in providers are reported.
+    aliases; without it, only the built-in providers are reported. ``policy``
+    gates ``run_skill_script``; without one, scripts are off.
     """
+    from agentharness.skills.runner import ScriptPolicy as _ScriptPolicy
     from agentharness.tools.fs_tools import make_fs_tools
     from agentharness.tools.greet import greet_tool
     from agentharness.tools.provider_tools import list_providers_tool
+    from agentharness.tools.script_tools import make_script_tools
     from agentharness.tools.search_tools import web_search_tool
     from agentharness.tools.skill_tools import make_skill_tools
     from agentharness.tools.web_tools import web_fetch_tool
@@ -107,5 +112,9 @@ def build_default_registry(
     for tool in make_skill_tools(skillset):
         registry.register(tool)
     for tool in make_fs_tools(workspace):
+        registry.register(tool)
+    # A disabled default matters: a caller that passes no policy gets a harness
+    # that executes nothing, which is what every existing caller expects.
+    for tool in make_script_tools(skillset, workspace, policy or _ScriptPolicy()):
         registry.register(tool)
     return registry

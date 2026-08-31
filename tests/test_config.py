@@ -113,3 +113,19 @@ def test_workspace_from_yaml_and_env(monkeypatch, tmp_path):
     cfg = load_config()
     assert cfg.workspace_dir == "/elsewhere"
     assert cfg.workspace_writable is True  # env overrides the file, both ways
+
+
+def test_skill_scripts_block_loaded(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("AGENTHARNESS_CONFIG", raising=False)
+    assert load_config().skill_scripts == {}  # absent block is an empty mapping
+
+    path = tmp_path / "c.yaml"
+    path.write_text(
+        "skill_scripts:\n  enabled: true\n  env_allowlist: [GITHUB_TOKEN]\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("AGENTHARNESS_CONFIG", str(path))
+    cfg = load_config()
+    assert cfg.skill_scripts["enabled"] is True
+    assert cfg.skill_scripts["env_allowlist"] == ["GITHUB_TOKEN"]

@@ -16,7 +16,7 @@ from pathlib import Path
 
 import yaml
 
-from agentharness.skills.model import Skill
+from agentharness.skills.model import ENV_NAME_RE, Skill
 
 # name: 1-64 chars, lowercase alphanumeric groups joined by single hyphens,
 # no leading/trailing/consecutive hyphens. This one regex covers all four rules.
@@ -85,6 +85,25 @@ def _split_frontmatter(text: str) -> tuple[dict, str]:
     return meta, body.strip()
 
 
+def _parse_script_env(raw: str | None) -> frozenset[str]:
+    """Parse ``metadata.env``: the variables a skill asks its scripts be given.
+
+    Space-separated, in the style of ``allowed-tools``. Validated here so a typo
+    fails this one skill at load, with the offending name quoted, rather than
+    silently dropping a variable at run time where nobody would connect the two.
+    """
+    if raw is None:
+        return frozenset()
+    names = raw.split()
+    for name in names:
+        if not ENV_NAME_RE.match(name):
+            raise ValueError(
+                f"invalid metadata.env entry {name!r}: environment variable names "
+                "must match [A-Z_][A-Z0-9_]*"
+            )
+    return frozenset(names)
+
+
 def _validate_and_build(directory: Path, meta: dict, body: str) -> Skill:
     name = meta.get("name")
     if not isinstance(name, str) or not name:
@@ -115,6 +134,7 @@ def _validate_and_build(directory: Path, meta: dict, body: str) -> Skill:
     if not isinstance(raw_metadata, dict):
         raise ValueError("metadata must be a mapping")
     metadata = {str(k): str(v) for k, v in raw_metadata.items()}
+    script_env = _parse_script_env(metadata.get("env"))
 
     allowed_tools = meta.get("allowed-tools")
     if allowed_tools is not None and not isinstance(allowed_tools, str):
@@ -131,6 +151,7 @@ def _validate_and_build(directory: Path, meta: dict, body: str) -> Skill:
         compatibility=compatibility,
         allowed_tools=allowed_tools,
         metadata=metadata,
+        script_env=script_env,
     )
 
 

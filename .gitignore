@@ -17,3 +17,7 @@ mcp-tokens.json
 # The workspace mount point is tracked; whatever the model puts in it is not.
 workspace/*
 !workspace/.gitkeep
+# Isolated worktrees and subagent-run scratch (ledgers, briefs, review
+# packages). Both are working state, not history.
+.claude/worktrees/
+.superpowers/
